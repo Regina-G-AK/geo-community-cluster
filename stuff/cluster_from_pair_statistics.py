@@ -11,6 +11,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, Tuple
 
 import igraph as ig
 import leidenalg as la
@@ -18,8 +19,8 @@ import networkx as nx
 import pandas as pd
 
 
-MerchantPair = tuple[str, str]
-EdgeCandidate = tuple[float, float | None, int]
+MerchantPair = Tuple[str, str]
+EdgeCandidate = Tuple[float, Optional[float], int]
 MERCHANT_ID = "merchant_id"
 DEFAULT_CONFIG_PATH = Path("configs/shanghai.toml")
 DEFAULT_PAIRS_PATH = Path("data/shanghai/pair_statistics.sqlite3")
