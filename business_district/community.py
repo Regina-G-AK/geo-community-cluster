@@ -72,7 +72,18 @@ def calculate_participation(
     graph: nx.Graph,
     partition: dict[str, int],
 ) -> dict[str, float]:
-    result: dict[str, float] = {}
+    community_shares = calculate_community_weight_shares(graph, partition)
+    return {
+        merchant_id: 1.0 - sum(share**2 for share in shares.values())
+        for merchant_id, shares in community_shares.items()
+    }
+
+
+def calculate_community_weight_shares(
+    graph: nx.Graph,
+    partition: dict[str, int],
+) -> dict[str, dict[int, float]]:
+    shares_by_merchant: dict[str, dict[int, float]] = {}
     for node in graph:
         weight_by_community: dict[int, float] = defaultdict(float)
         total_weight = 0.0
@@ -81,13 +92,13 @@ def calculate_participation(
             total_weight += weight
             weight_by_community[partition[neighbor]] += weight
         if total_weight == 0:
-            result[str(node)] = 0.0
+            shares_by_merchant[str(node)] = {partition[str(node)]: 1.0}
             continue
-        result[str(node)] = 1.0 - sum(
-            (weight / total_weight) ** 2
-            for weight in weight_by_community.values()
-        )
-    return result
+        shares_by_merchant[str(node)] = {
+            community_id: weight / total_weight
+            for community_id, weight in weight_by_community.items()
+        }
+    return shares_by_merchant
 
 
 def clean_graph(

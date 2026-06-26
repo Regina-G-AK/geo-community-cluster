@@ -21,6 +21,7 @@ import pandas as pd
 
 MerchantPair = Tuple[str, str]
 EdgeCandidate = Tuple[float, Optional[float], int]
+PreparedEdgeCandidate = Tuple[float, float, Optional[float], int, float]
 MERCHANT_ID = "merchant_id"
 DEFAULT_CONFIG_PATH = Path("configs/shanghai.toml")
 DEFAULT_PAIRS_PATH = Path("data/shanghai/pair_statistics.sqlite3")
@@ -71,6 +72,8 @@ class GraphConfig:
     sppmi_shift: float
     top_k_neighbors: int
     minimum_z_score: float
+    degree_penalty_gamma: float
+    jaccard_threshold: float
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,9 @@ class AnchorConfig:
     maximum_count: int
     merchants_per_anchor: int
     minimum_community_size: int
+    maximum_participation: float
+    chain_visit_count_quantile: float
+    chain_minimum_visit_count: int
 
 
 @dataclass(frozen=True)
@@ -299,6 +305,14 @@ def load_config(path: Path) -> AppConfig:
     if smoothing_alpha > 1.0:
         raise ConfigurationError("配置项 graph.context_smoothing_alpha 不能大于 1")
 
+    degree_penalty_gamma = _require_float(graph, "degree_penalty_gamma", "graph", 0.0)
+    if degree_penalty_gamma > 1.0:
+        raise ConfigurationError("配置项 graph.degree_penalty_gamma 不能大于 1")
+
+    jaccard_threshold = _require_float(graph, "jaccard_threshold", "graph", 0.0)
+    if jaccard_threshold > 1.0:
+        raise ConfigurationError("配置项 graph.jaccard_threshold 不能大于 1")
+
     participation_threshold = _require_float(
         community,
         "participation_threshold",
@@ -307,6 +321,24 @@ def load_config(path: Path) -> AppConfig:
     )
     if participation_threshold > 1.0:
         raise ConfigurationError("配置项 community.participation_threshold 不能大于 1")
+
+    maximum_anchor_participation = _require_float(
+        anchors,
+        "maximum_participation",
+        "anchors",
+        0.0,
+    )
+    if maximum_anchor_participation > 1.0:
+        raise ConfigurationError("配置项 anchors.maximum_participation 不能大于 1")
+
+    chain_visit_count_quantile = _require_float(
+        anchors,
+        "chain_visit_count_quantile",
+        "anchors",
+        0.0,
+    )
+    if chain_visit_count_quantile > 1.0:
+        raise ConfigurationError("配置项 anchors.chain_visit_count_quantile 不能大于 1")
 
     return AppConfig(
         city=CityConfig(
@@ -364,6 +396,8 @@ def load_config(path: Path) -> AppConfig:
             sppmi_shift=_require_float(graph, "sppmi_shift", "graph", 1.0),
             top_k_neighbors=_require_int(graph, "top_k_neighbors", "graph", 1),
             minimum_z_score=_require_float(graph, "minimum_z_score", "graph", 0.0),
+            degree_penalty_gamma=degree_penalty_gamma,
+            jaccard_threshold=jaccard_threshold,
         ),
         community=CommunityConfig(
             algorithm=_community_algorithm(community),
@@ -395,6 +429,14 @@ def load_config(path: Path) -> AppConfig:
             minimum_community_size=_require_int(
                 anchors,
                 "minimum_community_size",
+                "anchors",
+                1,
+            ),
+            maximum_participation=maximum_anchor_participation,
+            chain_visit_count_quantile=chain_visit_count_quantile,
+            chain_minimum_visit_count=_require_int(
+                anchors,
+                "chain_minimum_visit_count",
                 "anchors",
                 1,
             ),
@@ -588,45 +630,141 @@ def calculate_edge_candidates(
     raise ValueError(f"不支持的商户边权重计算方式: {graph_config.edge_weight_method}")
 
 
+def _candidate_neighbor_sets(
+    candidates: dict[MerchantPair, EdgeCandidate],
+) -> dict[str, set[str]]:
+    neighbors: dict[str, set[str]] = defaultdict(set)
+    for left, right in candidates:
+        neighbors[left].add(right)
+        neighbors[right].add(left)
+    return neighbors
+
+
+def _edge_jaccard(
+    left: str,
+    right: str,
+    neighbor_sets: dict[str, set[str]],
+) -> float:
+    left_neighbors = neighbor_sets[left]
+    right_neighbors = neighbor_sets[right]
+    union = left_neighbors | right_neighbors
+    if not union:
+        return 0.0
+    return len(left_neighbors & right_neighbors) / len(union)
+
+
+def _degree_penalized_weight(
+    left: str,
+    right: str,
+    weight: float,
+    neighbor_sets: dict[str, set[str]],
+    gamma: float,
+) -> float:
+    if gamma == 0.0:
+        return weight
+    left_degree = len(neighbor_sets[left])
+    right_degree = len(neighbor_sets[right])
+    if left_degree < 1 or right_degree < 1:
+        raise AlgorithmError(
+            f"候选边端点缺少邻居度数: merchant_a={left!r}, merchant_b={right!r}"
+        )
+    return weight / ((left_degree * right_degree) ** gamma)
+
+
+def prepare_edge_candidates(
+    candidates: dict[MerchantPair, EdgeCandidate],
+    graph_config: GraphConfig,
+) -> dict[MerchantPair, PreparedEdgeCandidate]:
+    neighbor_sets = _candidate_neighbor_sets(candidates)
+    prepared: dict[MerchantPair, PreparedEdgeCandidate] = {}
+    for pair, (weight, z_score, support) in candidates.items():
+        left, right = pair
+        jaccard = _edge_jaccard(left, right, neighbor_sets)
+        if jaccard < graph_config.jaccard_threshold:
+            continue
+        graph_weight = (
+            _degree_penalized_weight(
+                left,
+                right,
+                weight,
+                neighbor_sets,
+                graph_config.degree_penalty_gamma,
+            )
+            if graph_config.edge_weight_method == "sppmi"
+            else weight
+        )
+        prepared[pair] = (
+            graph_weight,
+            weight,
+            z_score,
+            support,
+            jaccard,
+        )
+    return prepared
+
+
 def build_sparse_graph(
     statistics: PairStatistics,
     cooccurrence_config: CooccurrenceConfig,
     graph_config: GraphConfig,
 ) -> nx.Graph:
-    candidates = calculate_edge_candidates(
-        statistics,
-        cooccurrence_config,
+    prepared_candidates = prepare_edge_candidates(
+        calculate_edge_candidates(
+            statistics,
+            cooccurrence_config,
+            graph_config,
+        ),
         graph_config,
     )
-    neighbors: dict[str, list[tuple[str, float, float | None, int]]] = defaultdict(list)
-    for (left, right), (weight, z_score, support) in candidates.items():
-        neighbors[left].append((right, weight, z_score, support))
-        neighbors[right].append((left, weight, z_score, support))
+    neighbors: dict[
+        str,
+        list[tuple[str, float, float, float | None, int, float]],
+    ] = defaultdict(list)
+    for (left, right), (
+        graph_weight,
+        source_weight,
+        z_score,
+        support,
+        jaccard,
+    ) in prepared_candidates.items():
+        neighbors[left].append(
+            (right, graph_weight, source_weight, z_score, support, jaccard)
+        )
+        neighbors[right].append(
+            (left, graph_weight, source_weight, z_score, support, jaccard)
+        )
 
-    top_neighbors: dict[str, dict[str, EdgeCandidate]] = {}
+    top_neighbors: dict[str, dict[str, PreparedEdgeCandidate]] = {}
     for merchant_id, merchant_neighbors in neighbors.items():
         ordered = sorted(
             merchant_neighbors,
-            key=lambda item: (-item[1], -item[3], item[0]),
+            key=lambda item: (-item[1], -item[4], item[0]),
         )[: graph_config.top_k_neighbors]
         top_neighbors[merchant_id] = {
-            neighbor: (weight, z_score, support)
-            for neighbor, weight, z_score, support in ordered
+            neighbor: (weight, source_weight, z_score, support, jaccard)
+            for neighbor, weight, source_weight, z_score, support, jaccard in ordered
         }
 
     graph = nx.Graph()
     graph.add_nodes_from(sorted(statistics.merchant_visit_counts))
     for merchant_id, merchant_neighbors in top_neighbors.items():
-        for neighbor, (weight, z_score, support) in merchant_neighbors.items():
+        for neighbor, (
+            weight,
+            source_weight,
+            z_score,
+            support,
+            jaccard,
+        ) in merchant_neighbors.items():
             reverse = top_neighbors.get(neighbor, {})
             if merchant_id not in reverse or graph.has_edge(merchant_id, neighbor):
                 continue
             edge_attributes: dict[str, float | int] = {
                 "weight": float(weight),
                 "support": int(support),
+                "jaccard": float(jaccard),
             }
             if z_score is not None:
-                edge_attributes["sppmi"] = float(weight)
+                edge_attributes["sppmi"] = float(source_weight)
                 edge_attributes["z_score"] = float(z_score)
             graph.add_edge(merchant_id, neighbor, **edge_attributes)
     return graph
@@ -686,7 +824,18 @@ def calculate_participation(
     graph: nx.Graph,
     partition: dict[str, int],
 ) -> dict[str, float]:
-    result: dict[str, float] = {}
+    community_shares = calculate_community_weight_shares(graph, partition)
+    return {
+        merchant_id: 1.0 - sum(share**2 for share in shares.values())
+        for merchant_id, shares in community_shares.items()
+    }
+
+
+def calculate_community_weight_shares(
+    graph: nx.Graph,
+    partition: dict[str, int],
+) -> dict[str, dict[int, float]]:
+    shares_by_merchant: dict[str, dict[int, float]] = {}
     for node in graph:
         weight_by_community: dict[int, float] = defaultdict(float)
         total_weight = 0.0
@@ -695,13 +844,43 @@ def calculate_participation(
             total_weight += weight
             weight_by_community[partition[neighbor]] += weight
         if total_weight == 0:
-            result[str(node)] = 0.0
+            shares_by_merchant[str(node)] = {partition[str(node)]: 1.0}
             continue
-        result[str(node)] = 1.0 - sum(
-            (weight / total_weight) ** 2
-            for weight in weight_by_community.values()
-        )
-    return result
+        shares_by_merchant[str(node)] = {
+            community_id: weight / total_weight
+            for community_id, weight in weight_by_community.items()
+        }
+    return shares_by_merchant
+
+
+def _normalize_community_weights(
+    weights_by_merchant: dict[str, dict[int, float]],
+) -> dict[str, dict[int, float]]:
+    shares_by_merchant: dict[str, dict[int, float]] = {}
+    for merchant_id, weights in weights_by_merchant.items():
+        total_weight = sum(weights.values())
+        if total_weight <= 0.0:
+            continue
+        shares_by_merchant[merchant_id] = {
+            community_id: weight / total_weight
+            for community_id, weight in weights.items()
+            if weight > 0.0
+        }
+    return shares_by_merchant
+
+
+def calculate_candidate_community_weight_shares(
+    candidates: dict[MerchantPair, PreparedEdgeCandidate],
+    partition: dict[str, int],
+) -> dict[str, dict[int, float]]:
+    weights_by_merchant: dict[str, dict[int, float]] = defaultdict(
+        lambda: defaultdict(float)
+    )
+    for (left, right), (weight, _, _, _, _) in candidates.items():
+        if left in partition and right in partition:
+            weights_by_merchant[left][partition[right]] += weight
+            weights_by_merchant[right][partition[left]] += weight
+    return _normalize_community_weights(weights_by_merchant)
 
 
 def clean_graph(
@@ -756,13 +935,165 @@ def _anchor_count(community_size: int, config: AnchorConfig) -> int:
     )
 
 
+def _membership_community_ids(
+    merchant_id: str,
+    primary_community_id: int,
+    is_chain_like: bool,
+    community_shares: dict[str, dict[int, float]],
+    candidate_community_shares: dict[str, dict[int, float]],
+) -> tuple[int, ...]:
+    if not is_chain_like:
+        return (primary_community_id,)
+    shares = candidate_community_shares.get(
+        merchant_id,
+        community_shares.get(merchant_id, {}),
+    )
+    linked_community_ids = {
+        community_id
+        for community_id, share in shares.items()
+        if share > 0.0
+    }
+    linked_community_ids.add(primary_community_id)
+    return tuple(sorted(linked_community_ids))
+
+
+def _expand_multi_community_memberships(
+    merchants: pd.DataFrame,
+    community_shares: dict[str, dict[int, float]],
+    candidate_community_shares: dict[str, dict[int, float]],
+) -> pd.DataFrame:
+    if merchants.empty:
+        return merchants.assign(
+            primary_community_id=pd.Series(dtype="int64"),
+            community_share=pd.Series(dtype="float64"),
+            is_primary_community=pd.Series(dtype="int64"),
+            is_multi_community_member=pd.Series(dtype="int64"),
+        )
+    rows: list[dict[str, str | int | float]] = []
+    for row in merchants.to_dict("records"):
+        merchant_id = str(row["merchant_id"])
+        primary_community_id = int(row["community_id"])
+        is_chain_like = bool(row["is_chain_like"])
+        community_ids = _membership_community_ids(
+            merchant_id,
+            primary_community_id,
+            is_chain_like,
+            community_shares,
+            candidate_community_shares,
+        )
+        is_multi_community_member = int(len(community_ids) > 1)
+        for community_id in community_ids:
+            membership = dict(row)
+            shares = (
+                candidate_community_shares.get(merchant_id, {})
+                if is_chain_like
+                else community_shares.get(merchant_id, {})
+            )
+            membership["primary_community_id"] = primary_community_id
+            membership["community_id"] = int(community_id)
+            membership["community_share"] = float(shares.get(community_id, 0.0))
+            membership["is_primary_community"] = int(community_id == primary_community_id)
+            membership["is_multi_community_member"] = is_multi_community_member
+            if community_id != primary_community_id:
+                membership["is_anchor_candidate"] = 0
+                membership["anchor_score"] = 0.0
+            rows.append(membership)
+    return pd.DataFrame(rows)
+
+
+def _visit_count_quantile_threshold(
+    visit_counts: list[int],
+    quantile: float,
+) -> int:
+    if not visit_counts:
+        return 0
+    ordered = sorted(visit_counts)
+    index = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * quantile) - 1))
+    return int(ordered[index])
+
+
+def _chain_visit_count_threshold(
+    result: pd.DataFrame,
+    anchor_config: AnchorConfig,
+) -> int:
+    quantile_threshold = _visit_count_quantile_threshold(
+        [int(value) for value in result["visit_count"].tolist()],
+        anchor_config.chain_visit_count_quantile,
+    )
+    return max(anchor_config.chain_minimum_visit_count, quantile_threshold)
+
+
+def _connected_community_count(
+    merchant_id: str,
+    community_shares: dict[str, dict[int, float]],
+) -> int:
+    return sum(
+        1
+        for share in community_shares.get(merchant_id, {}).values()
+        if share > 0.0
+    )
+
+
+def _chain_reason(
+    high_participation: bool,
+    high_visit_count: bool,
+) -> str:
+    if high_participation and high_visit_count:
+        return "participation|visit_count"
+    if high_participation:
+        return "participation"
+    if high_visit_count:
+        return "visit_count"
+    return ""
+
+
+def _add_chain_like_flags(
+    result: pd.DataFrame,
+    community_shares: dict[str, dict[int, float]],
+    anchor_config: AnchorConfig,
+) -> pd.DataFrame:
+    if result.empty:
+        return result.assign(
+            connected_community_count=pd.Series(dtype="int64"),
+            chain_visit_count_threshold=pd.Series(dtype="int64"),
+            is_chain_like=pd.Series(dtype="int64"),
+            chain_reason=pd.Series(dtype="object"),
+        )
+    threshold = _chain_visit_count_threshold(result, anchor_config)
+    enriched = result.copy()
+    connected_counts = [
+        _connected_community_count(str(merchant_id), community_shares)
+        for merchant_id in enriched["merchant_id"].tolist()
+    ]
+    enriched["connected_community_count"] = connected_counts
+    enriched["chain_visit_count_threshold"] = threshold
+    high_participation = (
+        enriched["participation"].astype(float) > anchor_config.maximum_participation
+    )
+    high_visit_count = enriched["visit_count"].astype(int) >= threshold
+    enriched["is_chain_like"] = (high_participation | high_visit_count).astype(int)
+    enriched["chain_reason"] = [
+        _chain_reason(bool(participation_flag), bool(visit_flag))
+        for participation_flag, visit_flag in zip(
+            high_participation.tolist(),
+            high_visit_count.tolist(),
+        )
+    ]
+    return enriched
+
+
 def build_merchant_results(
     cleaning: CleaningResult,
     statistics: PairStatistics,
     anchor_config: AnchorConfig,
+    candidate_community_shares: dict[str, dict[int, float]],
     city_code: str,
 ) -> pd.DataFrame:
     participation = calculate_participation(cleaning.graph, cleaning.partition)
+    community_shares = calculate_community_weight_shares(
+        cleaning.graph,
+        cleaning.partition,
+    )
     communities: dict[int, list[str]] = {}
     for merchant_id, community_id in cleaning.partition.items():
         communities.setdefault(community_id, []).append(merchant_id)
@@ -802,23 +1133,32 @@ def build_merchant_results(
         )
 
     result = pd.DataFrame(rows)
+    result = _add_chain_like_flags(result, community_shares, anchor_config)
     if not result.empty:
         anchor_indices: list[int] = []
         for _, group in result.groupby("community_id", sort=True):
             if len(group) < anchor_config.minimum_community_size:
                 continue
             count = _anchor_count(len(group), anchor_config)
-            ordered = group.sort_values(
+            eligible = group.loc[group["is_chain_like"] == 0]
+            ordered = eligible.sort_values(
                 ["anchor_score", "weighted_degree", "visit_count", "merchant_id"],
                 ascending=[False, False, False, True],
             )
             anchor_indices.extend(ordered.head(count).index.tolist())
         result.loc[anchor_indices, "is_anchor_candidate"] = 1
 
+    result = _expand_multi_community_memberships(
+        result,
+        community_shares,
+        candidate_community_shares,
+    )
+
     removed_rows = [
         {
             "city_code": city_code,
             "merchant_id": merchant_id,
+            "primary_community_id": -1,
             "community_id": -1,
             "merchant_status": status,
             "is_anchor_candidate": 0,
@@ -826,6 +1166,13 @@ def build_merchant_results(
             "pagerank": 0.0,
             "participation": 0.0,
             "weighted_degree": 0.0,
+            "community_share": 0.0,
+            "is_primary_community": 0,
+            "is_multi_community_member": 0,
+            "connected_community_count": 0,
+            "chain_visit_count_threshold": 0,
+            "is_chain_like": 0,
+            "chain_reason": "",
             "visit_count": int(statistics.merchant_visit_counts.get(merchant_id, 0)),
         }
         for merchant_id, status in cleaning.statuses.items()
@@ -942,6 +1289,7 @@ def write_cluster_outputs(
         "merchant_b",
         "weight",
         "sppmi",
+        "jaccard",
         "support",
         "z_score",
     ]
@@ -953,6 +1301,7 @@ def write_cluster_outputs(
                 "merchant_b": str(right),
                 "weight": float(data["weight"]),
                 "sppmi": data.get("sppmi"),
+                "jaccard": data.get("jaccard"),
                 "support": int(data["support"]),
                 "z_score": data.get("z_score"),
             }
@@ -967,7 +1316,7 @@ def write_cluster_outputs(
     )
     nx.write_graphml(output_graph, output_directory / "graph.graphml")
 
-    summary: dict[str, str | int] = {
+    summary: dict[str, str | int | float] = {
         "city_code": city_code,
         "merchant_count": int(len(merchants)),
         "community_count": int(len(communities)),
@@ -981,9 +1330,32 @@ def write_cluster_outputs(
             (merchants["merchant_status"] == "suspect_isolated").sum()
         ),
         "anchor_candidate_count": int(merchants["is_anchor_candidate"].sum()),
+        "chain_like_merchant_count": int(
+            merchants.loc[
+                merchants["is_chain_like"] == 1,
+                "merchant_id",
+            ].nunique()
+        ),
+        "visit_count_chain_like_merchant_count": int(
+            merchants.loc[
+                merchants["chain_reason"].astype(str).str.contains("visit_count"),
+                "merchant_id",
+            ].nunique()
+        ),
+        "multi_community_member_count": int(
+            merchants.loc[
+                merchants["is_multi_community_member"] == 1,
+                "merchant_id",
+            ].nunique()
+        ),
         "cleaning_rounds": cleaning.cleaning_rounds,
         "community_algorithm": config.community.algorithm,
         "edge_weight_method": config.graph.edge_weight_method,
+        "degree_penalty_gamma": config.graph.degree_penalty_gamma,
+        "jaccard_threshold": config.graph.jaccard_threshold,
+        "maximum_anchor_participation": config.anchors.maximum_participation,
+        "chain_visit_count_quantile": config.anchors.chain_visit_count_quantile,
+        "chain_minimum_visit_count": config.anchors.chain_minimum_visit_count,
         "source": "pair_statistics",
     }
     with (output_directory / "summary.json").open("w", encoding="utf-8") as file:
@@ -1037,7 +1409,9 @@ def build_experiment_record(
         config.cooccurrence,
         config.graph,
     )
+    structurally_kept_candidates = prepare_edge_candidates(candidates, config.graph)
     candidate_merchants = _pair_merchants(set(candidates))
+    structurally_kept_merchants = _pair_merchants(set(structurally_kept_candidates))
     connected_merchants = {str(node) for node in graph if graph.degree(node) > 0}
     cleaned_connected_merchants = {
         str(node)
@@ -1063,11 +1437,30 @@ def build_experiment_record(
             "is_anchor_candidate",
         ].sum()
     )
+    multi_community_member_count = int(
+        active_merchants.loc[
+            active_merchants["is_multi_community_member"] == 1,
+            "merchant_id",
+        ].nunique()
+    )
+    chain_like_merchant_count = int(
+        active_merchants.loc[
+            active_merchants["is_chain_like"] == 1,
+            "merchant_id",
+        ].nunique()
+    )
+    visit_count_chain_like_merchant_count = int(
+        active_merchants.loc[
+            active_merchants["chain_reason"].astype(str).str.contains("visit_count"),
+            "merchant_id",
+        ].nunique()
+    )
 
     losses: dict[str, int] = {
         "未形成时间窗商户对": total_merchants - len(raw_pair_merchants),
         "最小支持人数过滤": len(raw_pair_merchants) - len(supported_merchants),
-        "互为 top-k 过滤": len(candidate_merchants) - len(connected_merchants),
+        "Jaccard 结构门槛过滤": len(candidate_merchants) - len(structurally_kept_merchants),
+        "互为 top-k 过滤": len(structurally_kept_merchants) - len(connected_merchants),
         "迭代 hub 清洗": len(connected_merchants) - len(cleaned_connected_merchants),
         "有效社区规模过滤": len(cleaned_connected_merchants) - valid_merchant_count,
     }
@@ -1111,6 +1504,8 @@ def build_experiment_record(
     PMI_ALPHA = {config.graph.context_smoothing_alpha}
     TOP_K_NEIGHBORS = {config.graph.top_k_neighbors}
     MINIMUM_Z_SCORE = {config.graph.minimum_z_score}
+    DEGREE_PENALTY_GAMMA = {config.graph.degree_penalty_gamma}
+    JACCARD_THRESHOLD = {config.graph.jaccard_threshold}
     COMMUNITY_ALGORITHM = {config.community.algorithm!r}
     COMMUNITY_RANDOM_SEED = {config.community.random_seed}
     MAX_CLEANING_ROUNDS = {config.community.maximum_cleaning_rounds}
@@ -1121,6 +1516,9 @@ def build_experiment_record(
     ANCHOR_MAX_N = {config.anchors.maximum_count}
     ANCHOR_MERCHANTS_PER_COUNT = {config.anchors.merchants_per_anchor}
     ANCHOR_MIN_COMMUNITY_SIZE = {config.anchors.minimum_community_size}
+    ANCHOR_MAX_PARTICIPATION = {config.anchors.maximum_participation}
+    CHAIN_VISIT_COUNT_QUANTILE = {config.anchors.chain_visit_count_quantile}
+    CHAIN_MINIMUM_VISIT_COUNT = {config.anchors.chain_minimum_visit_count}
     OUTPUT_ROOT = {str(config.output.directory)!r}
     EXPERIMENT_PATH = {str(config.experiments.path)!r}
     ```
@@ -1129,6 +1527,7 @@ def build_experiment_record(
         - 原始商户对：{len(raw_pairs)}对，覆盖商户{len(raw_pair_merchants)}个
         - 支持人数>={config.cooccurrence.minimum_unique_users}：{len(supported_pairs)}对，覆盖商户{len(supported_merchants)}个
         - {candidate_stage}：{len(candidates)}对，覆盖商户{len(candidate_merchants)}个
+        - 通过 Jaccard 结构门槛：{len(structurally_kept_candidates)}对，覆盖商户{len(structurally_kept_merchants)}个
         - 通过互为 top-k：{graph.number_of_edges()}条边，覆盖商户{len(connected_merchants)}个
         - 迭代 hub 清洗后：{cleaning.graph.number_of_edges()}条边，覆盖商户{len(cleaned_connected_merchants)}个
     - 聚类结果：
@@ -1138,6 +1537,8 @@ def build_experiment_record(
         - 有效社区商户：{valid_merchant_count}个，占全部商户{coverage:.2%}
         - 候选锚点：{int(raw_merchants['is_anchor_candidate'].sum())}个，单社区最大{maximum_anchor_count}个
         - 无效社区锚点：{invalid_anchor_count}个
+        - 连锁/泛客群商户：{chain_like_merchant_count}个，其中访问量规则命中{visit_count_chain_like_merchant_count}个
+        - 多商圈普通成员：{multi_community_member_count}个
         - 清洗轮数：{cleaning.cleaning_rounds}
     - 自动分析：
         - 最大商户损失阶段：{largest_loss_stage}，减少{largest_loss_count}个商户
@@ -1188,10 +1589,22 @@ def run_cluster_from_pairs(
     statistics = load_pair_statistics(pair_statistics_path)
     graph = build_sparse_graph(statistics, config.cooccurrence, config.graph)
     cleaning = clean_graph(graph, config.community)
+    candidate_community_shares = calculate_candidate_community_weight_shares(
+        prepare_edge_candidates(
+            calculate_edge_candidates(
+                statistics,
+                config.cooccurrence,
+                config.graph,
+            ),
+            config.graph,
+        ),
+        cleaning.partition,
+    )
     raw_merchants = build_merchant_results(
         cleaning,
         statistics,
         config.anchors,
+        candidate_community_shares,
         config.city.code,
     )
     merchants = filter_merchants_by_community_size(raw_merchants, 3)

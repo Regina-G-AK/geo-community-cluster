@@ -22,8 +22,7 @@ test = [
 
 [project.scripts]
 business-district = "business_district.cli:main"
-business-district-pairs = "business_district.pair_cli:main"
-business-district-cached = "business_district.cached_cluster_cli:main"
+business-district-hive = "business_district.hive_task:main"
 incremental-assignment = "incremental_assignment.cli:main"
 
 [tool.setuptools.packages.find]

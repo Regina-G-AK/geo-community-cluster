@@ -100,6 +100,24 @@ def build_experiment_record(
             "is_anchor_candidate",
         ].sum()
     )
+    chain_like_merchant_count = int(
+        merchants.loc[
+            merchants["is_chain_like"] == 1,
+            "merchant_id",
+        ].nunique()
+    )
+    visit_count_chain_like_merchant_count = int(
+        merchants.loc[
+            merchants["chain_reason"].astype(str).str.contains("visit_count"),
+            "merchant_id",
+        ].nunique()
+    )
+    multi_community_member_count = int(
+        active_merchants.loc[
+            active_merchants["is_multi_community_member"] == 1,
+            "merchant_id",
+        ].nunique()
+    )
 
     losses: dict[str, int] = {
         "未形成时间窗商户对": total_merchants - len(raw_pair_merchants),
@@ -161,6 +179,9 @@ def build_experiment_record(
     ANCHOR_MAX_N = {config.anchors.maximum_count}
     ANCHOR_MERCHANTS_PER_COUNT = {config.anchors.merchants_per_anchor}
     ANCHOR_MIN_COMMUNITY_SIZE = {config.anchors.minimum_community_size}
+    ANCHOR_MAX_PARTICIPATION = {config.anchors.maximum_participation}
+    CHAIN_VISIT_COUNT_QUANTILE = {config.anchors.chain_visit_count_quantile}
+    CHAIN_MINIMUM_VISIT_COUNT = {config.anchors.chain_minimum_visit_count}
     OUTPUT_ROOT = {str(config.output.directory)!r}
     EXPERIMENT_PATH = {str(config.experiments.path)!r}
     ```
@@ -178,6 +199,8 @@ def build_experiment_record(
         - 有效社区商户：{valid_merchant_count}个，占全部商户{coverage:.2%}
         - 候选锚点：{int(merchants['is_anchor_candidate'].sum())}个，单社区最多{maximum_anchor_count}个
         - 无效社区锚点：{invalid_anchor_count}个
+        - 连锁/泛客群商户：{chain_like_merchant_count}个，其中访问量规则命中{visit_count_chain_like_merchant_count}个
+        - 多商圈普通成员：{multi_community_member_count}个
         - 清洗轮数：{cleaning.cleaning_rounds}
     - 自动分析：
         - 最大商户损失阶段：{largest_loss_stage}，减少{largest_loss_count}个商户

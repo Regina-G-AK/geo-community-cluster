@@ -1,6 +1,6 @@
-# 商圈聚类
+# 商圈初始化聚类
 
-本项目实现 `docs/README.md` 中的算法一：根据持卡人短时间内的商户到访共现，构建商户关系图并生成初始商圈和候选锚点。
+本项目实现基于交易共现关系的商圈初始化聚类。主流程直接读取原始交易数据，在内存中构建商户对、商户图和社区结果，输出业务结果表，并在同一次运行目录保留可复用的商户对中间文件。
 
 ## 运行
 
@@ -8,21 +8,130 @@
 python -m business_district --config configs/shanghai.ini
 ```
 
-所有城市相关信息、输入文件和算法参数均由 INI 风格配置提供，使用 Python 标准库 `configparser` 读取。新增城市时复制 `configs/shanghai.ini`，修改城市标识、输入文件和输出根目录，不需要修改算法代码。每次运行会在输出根目录下创建 `{edge_weight_method}_{community_algorithm}_{YYMMDDHHMMSS}` 格式的独立目录，已有目录不会被覆盖，失败运行的目录会保留以便排查。
+每次运行会在 `[output].directory` 下创建 `{edge_weight_method}_{community_algorithm}_{YYMMDDHHMMSS}` 格式的独立目录，避免覆盖历史结果。成功落盘后会向 `[experiments].path` 追加实验记录。
 
-当前交易数据使用无表头 `|` 分隔文本，每行格式为 `卡号|流水单号|店名|时间戳|||地区|||`。程序使用卡号、店名和时间戳构建到访与商户边，店名会作为输出中的 `merchant_id`。因此本版实现以下可落地流程：
+Hive 环境可使用旧线上任务风格入口：
 
-- 严格校验并清洗交易数据
-- 合并同卡同商户的短时重复交易
-- 剔除单日到访商户数异常的卡
-- 用户级共现贡献封顶和时间衰减
-- 可配置 SPPMI 或原始共同交易强度作为边权重，并执行互为 top-k 近邻建图
-- Leiden 社区发现和高参与度 hub 迭代清洗
-- 输出前删除少于 3 个商户的商圈，并同步裁剪商户、边和图文件
-- 基于社区内 PageRank 和参与系数的候选锚点评分
-- 输出商户、商圈、边、图文件和运行摘要
+```powershell
+python -m business_district.hive_task
+```
 
-方案中的城市分布熵、MCC/渠道规则、退款冲正、跨期稳定性和坐标校验需要额外输入字段。缺少这些数据时程序不会伪造对应结果。
+该入口读取 `dev_icamp.icamp_merchant_cluster_algo_input` 的 T-1 分区，使用 `configs/shanghai.ini` 中的算法参数运行聚类，并按旧逻辑通过临时表覆盖写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的对应 `dt` 分区。当前算法不生成风险商户结果，`dev_icamp.icamp_merchant_cluster_algo_risk` 保留空结果跳过写入。
+
+Jupyter 环境可直接打开：
+
+```text
+notebooks/run_hive_business_district.ipynb
+```
+
+notebook 通过 `HiveTaskConfig` 显式传入配置路径、输入表、输出表、临时表和 `dt_expression`，再调用 `run_hive_task(task_config)`，不复制算法逻辑。
+
+## 输入
+
+交易文件需要包含表头，字段如下：
+
+- `account_number`：卡号，用于按持卡人构建共现。
+- `global_flow_number`：流水号，必须非空且唯一。
+- `storename`：商户名称，用作聚类商户 ID。
+- `transaction_time`：交易时间，按 `[input].timestamp_formats` 解析。
+- `pos_longitude`：经度，可为空，不参与初始化聚类。
+- `pos_latitude`：纬度，可为空，不参与初始化聚类。
+- `region`：地区，输出使用该商户最新交易时间对应的值。
+- `is_intefere`：输入可为空，初始化聚类忽略该字段。
+- `status`：输入可为空，初始化聚类忽略该字段。
+- `dt`：日期，不参与算法，输出使用该商户最新交易时间对应的值。
+
+商户对构建只使用 `account_number`、`storename` 和 `transaction_time`。经纬度、人工干预、输入状态和 `dt` 不参与算法。
+
+## 输出
+
+主流程输出业务结果表：
+
+```text
+business_district.csv
+```
+
+字段如下：
+
+- `storename`
+- `primary_community_id`
+- `community_id`
+- `previous_community_id`
+- `region`
+- `is_interfere`
+- `update_time`
+- `status`
+- `is_position`
+- `community_share`
+- `is_primary_community`
+- `is_multi_community_member`
+- `is_chain_like`
+- `chain_reason`
+- `chain_visit_count_threshold`
+- `connected_community_count`
+- `dt`
+
+初始化聚类输出规则：
+
+- `previous_community_id` 固定为空。
+- `is_interfere` 固定为 `0`。
+- `update_time` 格式为 `%Y-%m-%d %H:%M:%S`。
+- `primary_community_id` 表示主社区，`community_id` 表示本行挂靠社区；疑似线上、疑似孤立商户为空。
+- `is_position` 表示是否为主社区锚点商户。
+- `community_share` 表示商户挂靠到本行商圈的边权占比。
+- `is_primary_community` 表示本行是否为商户主社区。
+- `is_multi_community_member` 表示商户是否被展开到多个商圈。
+- `is_chain_like` 表示是否命中连锁/泛客群规则。
+- `chain_reason` 为空、`participation`、`visit_count` 或 `participation|visit_count`。
+- `chain_visit_count_threshold` 是本次运行访问量规则使用的阈值。
+- `connected_community_count` 是商户在最终清洗图中连接到的社区数。
+
+同一运行目录还会写入商户对中间文件：
+
+```text
+pair_statistics.sqlite3
+```
+
+该文件包含 `merchant_pairs` 和 `merchant_visits` 两张表，用于复用商户对统计结果重新执行后续聚类实验。文件与业务 CSV 都保留在本地运行目录，不在当前包内写入 Hive。
+
+Hive 入口输入表必须包含：
+
+- `account_number`
+- `global_flow_number`
+- `storename`
+- `transaction_time`
+- `pos_longitude`
+- `pos_latitude`
+- `region`
+- `is_interfere`
+- `is_abnormal`
+- `dt`
+
+`pos_longitude`、`pos_latitude`、`is_interfere` 和 `is_abnormal` 在输入时允许为空，不参与当前聚类逻辑。
+
+Hive 入口写入目标表字段为：
+
+- `storename`
+- `community_id`
+- `previous_community_id`
+- `region`
+- `is_interfere`
+- `update_time`
+- `is_abnormal`
+- `is_position`
+- `dt`
+
+其中 `community_id` 为商圈 ID，连锁/泛客群多商圈商户会保留多条挂靠记录；`previous_community_id` 留空，`region` 与输入表保持一致，`is_interfere` 固定为 `0`，`update_time` 为运行时间戳，`is_abnormal` 使用当前算法状态，`is_position` 表示是否为锚点商户，`dt` 与输入表保持一致。
+
+## 商户状态
+
+初始化聚类只输出以下状态：
+
+- `normal`：商户进入有效商圈。
+- `suspect_isolated`：商户没有有效边，或所在社区未达到有效商圈规模。
+- `suspect_online`：迭代 hub 清洗阶段识别出的高参与度 hub 商户。
+
+`suspect_lost` 不在初始化聚类中输出。
 
 ## 测试
 
@@ -30,60 +139,12 @@ python -m business_district --config configs/shanghai.ini
 python -m pytest
 ```
 
-## 新商户增量归属
+## 商户对聚类参数
 
-算法二的增量归属代码放在独立包 `incremental_assignment` 中，不放入 `business_district` 目录。示例配置为：
+`stuff/cluster_from_pair_statistics.py` 在 SPPMI 建图阶段支持以下额外参数：
 
-```powershell
-python -m incremental_assignment --config configs/incremental_shanghai.ini
-```
-
-待判定商户输入表为 CSV，必须包含以下字段：
-
-- `city_code`
-- `merchant_id`
-- `first_seen_at`
-- `last_seen_at`
-- `unique_user_count`
-- `customer_ids`，多个持卡人 ID 使用 `|` 分隔
-
-可选字段：
-
-- `latitude`
-- `longitude`
-- `hourly_profile`，24 个小时桶计数使用 `|` 分隔
-
-程序读取算法一输出目录中的 `merchants.csv`、`communities.csv`、`edges.csv` 和 `summary.json`，复用 `edges.csv` 中的 SPPMI 边权进行图投票。观察池、商户档案和商圈档案先写入本地 CSV；每次成功运行会创建独立输出目录，并写出 `decisions.csv`、`manual_review.csv`、`observation_pool.csv`、`merchant_archive.csv`、`community_archive.csv` 和 `summary.json`。增量运行记录写入 `docs/incremental_experiments.md`。
-
-初始阈值为 `min_observation_days=28`、`min_unique_users=5`、`theta=0.55`、`delta=0.10`。地理分数已实现；当新商户或商圈锚点缺少可用坐标时，地理权重会按比例分摊给图分数和客群分数。
-
-## 边权重计算方式
-
-`[graph].edge_weight_method` 支持以下值：
-
-- `sppmi`：默认方式，执行 CDS 平滑、SPPMI 和显著性过滤。
-- `transaction_count`：保留最小支持人数过滤，直接使用原始商户对阶段的 `strength` 作为边权重，不计算 SPPMI 和 z-score，也不执行对应阈值过滤。
-
-两种方式共用互为 top-k、迭代 hub 清洗、Leiden 社区发现和有效社区过滤。`edges.csv` 始终包含 `sppmi` 和 `z_score` 字段；`transaction_count` 模式下这两个字段为空。
-
-## 商户对中间数据
-
-可单独生成商户对统计文件，后续建图和性能测试可直接读取该文件，避免重复清洗和扫描原始交易：
-
-```powershell
-python -m business_district.pair_cli --config configs/shanghai.ini --output algorithm_one_output/pair_statistics.sqlite3
-```
-
-SQLite 文件包含 `merchant_pairs` 和 `merchant_visits` 两张表。前者保存商户对强度和支持用户数，后者保留所有商户的到访次数，包括没有形成商户对的孤立商户。
-
-可直接读取中间文件执行建图和聚类，不重复处理原始交易：
-
-```powershell
-python -m business_district.cached_cluster_cli --config configs/shanghai.ini --pairs algorithm_one_output/pair_statistics.sqlite3 --output algorithm_one_output
-```
-
-该入口不读取到访明细，因此基础社区结果不包含高峰小时和小时一致性字段。
-
-输出结果只保留至少包含 3 个商户的商圈；少于 3 个商户的商圈不会写入 `communities.csv`，对应商户也不会写入 `merchants.csv`。社区统计中，`community_count_ge_3` 表示至少包含 3 个商户的有效社区，`community_count_ge_10` 表示至少包含 10 个商户的较大社区。锚点只从达到 `anchors.minimum_community_size` 的社区中选择，每个社区的锚点数量不超过 `anchors.maximum_count`。
-
-聚类结果成功写出后，程序会自动向 `[experiments].path` 指定的 Markdown 文件追加实验记录，包括实际输出目录、完整参数、边过滤漏斗、社区规模、有效商户覆盖率、锚点约束、清洗轮数、耗时和主要损失阶段分析。`transaction_count` 模式会将 SPPMI 阶段标记为已跳过，并在最大损失阶段分析中排除该阶段。
+- `[graph].degree_penalty_gamma`：按端点候选邻居度数惩罚 SPPMI 边权，当前建议 `0.0`，先退回原始 SPPMI，避免连锁店跨商圈边被过度压低。
+- `[graph].jaccard_threshold`：边两端候选邻居集合的 Jaccard 结构门槛，当前建议 `0.0`，先保留低重叠的跨商圈边用于识别多商圈普通成员。
+- `[anchors].maximum_participation`：锚点候选最大参与系数，当前建议 `0.1`，超过该阈值的商户不能成为锚点，并会作为普通成员按连接社区展开到多个商圈。
+- `[anchors].chain_visit_count_quantile`：访问量型连锁/泛客群规则的分位阈值，当前建议 `0.9`，即取访问量最高的约 10% 商户。
+- `[anchors].chain_minimum_visit_count`：访问量型规则的绝对访问次数下限，当前建议 `100`。

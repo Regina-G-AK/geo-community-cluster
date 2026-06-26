@@ -57,6 +57,9 @@ class AnchorConfig:
     maximum_count: int
     merchants_per_anchor: int
     minimum_community_size: int
+    maximum_participation: float
+    chain_visit_count_quantile: float
+    chain_minimum_visit_count: int
 
 
 @dataclass(frozen=True)
@@ -241,6 +244,22 @@ def load_config(path: Path) -> AppConfig:
     )
     if participation_threshold > 1.0:
         raise ConfigurationError("配置项 community.participation_threshold 不能大于 1")
+    maximum_anchor_participation = _require_float(
+        anchors,
+        "maximum_participation",
+        "anchors",
+        0.0,
+    )
+    if maximum_anchor_participation > 1.0:
+        raise ConfigurationError("配置项 anchors.maximum_participation 不能大于 1")
+    chain_visit_count_quantile = _require_float(
+        anchors,
+        "chain_visit_count_quantile",
+        "anchors",
+        0.0,
+    )
+    if chain_visit_count_quantile > 1.0:
+        raise ConfigurationError("配置项 anchors.chain_visit_count_quantile 不能大于 1")
 
     return AppConfig(
         city=CityConfig(
@@ -329,6 +348,14 @@ def load_config(path: Path) -> AppConfig:
             minimum_community_size=_require_int(
                 anchors,
                 "minimum_community_size",
+                "anchors",
+                1,
+            ),
+            maximum_participation=maximum_anchor_participation,
+            chain_visit_count_quantile=chain_visit_count_quantile,
+            chain_minimum_visit_count=_require_int(
+                anchors,
+                "chain_minimum_visit_count",
                 "anchors",
                 1,
             ),

@@ -2,3 +2,9 @@ receipt/
 
 *.zip
 data.txt
+
+.agents/
+.pytest_cache/
+
+__pycache__/
+*.pyc

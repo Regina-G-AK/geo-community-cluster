@@ -152,6 +152,36 @@ def calculate_edge_candidates(
     )
 
 
+def _normalize_community_weights(
+    weights_by_merchant: dict[str, dict[int, float]],
+) -> dict[str, dict[int, float]]:
+    shares_by_merchant: dict[str, dict[int, float]] = {}
+    for merchant_id, weights in weights_by_merchant.items():
+        total_weight = sum(weights.values())
+        if total_weight <= 0.0:
+            continue
+        shares_by_merchant[merchant_id] = {
+            community_id: weight / total_weight
+            for community_id, weight in weights.items()
+            if weight > 0.0
+        }
+    return shares_by_merchant
+
+
+def calculate_candidate_community_weight_shares(
+    candidates: dict[MerchantPair, EdgeCandidate],
+    partition: dict[str, int],
+) -> dict[str, dict[int, float]]:
+    weights_by_merchant: dict[str, dict[int, float]] = defaultdict(
+        lambda: defaultdict(float)
+    )
+    for (left, right), (weight, _, _) in candidates.items():
+        if left in partition and right in partition:
+            weights_by_merchant[left][partition[right]] += weight
+            weights_by_merchant[right][partition[left]] += weight
+    return _normalize_community_weights(weights_by_merchant)
+
+
 def build_sparse_graph(
     statistics: PairStatistics,
     cooccurrence_config: CooccurrenceConfig,

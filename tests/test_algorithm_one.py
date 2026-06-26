@@ -1,18 +1,20 @@
 import math
-import json
 import re
-from datetime import datetime
+import sqlite3
 from pathlib import Path
 
 import networkx as nx
 import pandas as pd
 import pytest
 
-from business_district.community import detect_communities
-from business_district.cached_cluster import run_cluster_from_pairs
-from business_district.config import load_config
-from business_district.config import CooccurrenceConfig, GraphConfig
-from business_district.errors import AlgorithmError
+from business_district.community import CleaningResult, detect_communities
+from business_district.config import (
+    AnchorConfig,
+    CooccurrenceConfig,
+    GraphConfig,
+    load_config,
+)
+from business_district.errors import TransactionDataError
 from business_district.graph import (
     PairStatistics,
     _calculate_sppmi_candidates,
@@ -20,9 +22,30 @@ from business_district.graph import (
     build_sparse_graph,
 )
 from business_district.pipeline import run_algorithm_one
-from business_district.pair_statistics import load_pair_statistics, write_pair_statistics
-from business_district.run_directory import create_run_directory
-from business_district.transactions import CARD, MERCHANT, TIMESTAMP
+from business_district.results import build_merchant_results
+from business_district.transactions import CARD, MERCHANT, TIMESTAMP, load_transactions
+
+
+def _transaction_row(
+    account_number: str,
+    flow_number: str,
+    storename: str,
+    transaction_time: str,
+    region: str,
+    dt: str,
+) -> str:
+    return (
+        f"{account_number}|{flow_number}|{storename}|{transaction_time}"
+        f"|||{region}|||{dt}"
+    )
+
+
+def _write_transaction_file(path: Path, rows: list[str]) -> None:
+    header = (
+        "account_number|global_flow_number|storename|transaction_time|"
+        "pos_longitude|pos_latitude|region|is_intefere|status|dt"
+    )
+    path.write_text("\n".join([header, *rows]), encoding="utf-8")
 
 
 def test_user_pair_contribution_uses_maximum() -> None:
@@ -50,56 +73,24 @@ def test_user_pair_contribution_uses_maximum() -> None:
     )
 
 
-def test_pair_statistics_file_round_trip(tmp_path: Path) -> None:
-    statistics = PairStatistics(
-        strengths={("a", "b"): 1.5},
-        supports={("a", "b"): 3},
-        merchant_visit_counts={"a": 4, "b": 5, "isolated": 1},
+def test_load_transactions_rejects_duplicate_flow_number(tmp_path: Path) -> None:
+    transaction_path = tmp_path / "data.txt"
+    _write_transaction_file(
+        transaction_path,
+        [
+            _transaction_row("u1", "f1", "a", "20260101T100000", "上海", "20260101"),
+            _transaction_row("u2", "f1", "b", "20260101T101000", "上海", "20260101"),
+        ],
     )
-    output_path = tmp_path / "pair_statistics.sqlite3"
-
-    write_pair_statistics(statistics, output_path)
-
-    assert load_pair_statistics(output_path) == statistics
-
-
-def test_cached_cluster_writes_outputs(tmp_path: Path) -> None:
-    pair_path = tmp_path / "pair_statistics.sqlite3"
-    write_pair_statistics(
-        PairStatistics(
-            strengths={
-                ("a", "b"): 8.0,
-                ("a", "c"): 8.0,
-                ("b", "c"): 8.0,
-                ("x", "y"): 8.0,
-            },
-            supports={
-                ("a", "b"): 8,
-                ("a", "c"): 8,
-                ("b", "c"): 8,
-                ("x", "y"): 8,
-            },
-            merchant_visit_counts={
-                "a": 8,
-                "b": 8,
-                "c": 8,
-                "x": 8,
-                "y": 8,
-                "isolated": 1,
-            },
-        ),
-        pair_path,
-    )
-    config_path = tmp_path / "cached-city.toml"
-    output_path = tmp_path / "cached-output"
+    config_path = tmp_path / "city.ini"
     config_path.write_text(
         f"""
 [city]
-code = "cached-city"
-name = "缓存测试市"
+code = "test-city"
+name = "测试市"
 
 [input]
-transactions_path = "unused.csv"
+transactions_path = "{transaction_path.as_posix()}"
 timestamp_formats = %Y%m%dT%H%M%S
 
 [visits]
@@ -113,7 +104,7 @@ minimum_unique_users = 1
 
 [graph]
 edge_weight_method = "transaction_count"
-context_smoothing_alpha = 1.0
+context_smoothing_alpha = 0.75
 sppmi_shift = 1.0
 top_k_neighbors = 5
 minimum_z_score = 0.0
@@ -122,7 +113,7 @@ minimum_z_score = 0.0
 algorithm = "leiden"
 resolution = 1.0
 random_seed = 42
-maximum_cleaning_rounds = 1
+maximum_cleaning_rounds = 2
 minimum_hub_degree = 10
 participation_threshold = 0.9
 
@@ -131,75 +122,21 @@ minimum_count = 1
 maximum_count = 2
 merchants_per_anchor = 2
 minimum_community_size = 2
+maximum_participation = 0.99
+chain_visit_count_quantile = 1.0
+chain_minimum_visit_count = 100
 
 [output]
-directory = "unused-output"
+directory = "{(tmp_path / 'output').as_posix()}"
 
 [experiments]
-path = "{(tmp_path / 'cached-experiments.md').as_posix()}"
+path = "{(tmp_path / 'experiments.md').as_posix()}"
 """,
         encoding="utf-8",
     )
-    default_config_path = tmp_path / "default-method-city.toml"
-    default_config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            'edge_weight_method = "transaction_count"\n',
-            "",
-        ),
-        encoding="utf-8",
-    )
-    assert load_config(default_config_path).graph.edge_weight_method == "sppmi"
 
-    summary = run_cluster_from_pairs(
-        load_config(config_path),
-        pair_path,
-        output_path,
-    )
-
-    assert summary.merchant_count == 3
-    assert summary.community_count == 1
-    run_directory = Path(summary.output_directory)
-    assert run_directory.parent == output_path
-    assert re.fullmatch(
-        r"transaction_count_leiden_\d{12}",
-        run_directory.name,
-    )
-    merchants = pd.read_csv(run_directory / "merchants.csv")
-    assert set(merchants["merchant_id"]) == {"a", "b", "c"}
-    assert (run_directory / "merchants.csv").exists()
-    assert (run_directory / "communities.csv").exists()
-    assert (run_directory / "edges.csv").exists()
-    assert (run_directory / "graph.graphml").exists()
-    assert (run_directory / "summary.json").exists()
-    summary_data = json.loads(
-        (run_directory / "summary.json").read_text(encoding="utf-8")
-    )
-    assert summary_data["edge_weight_method"] == "transaction_count"
-    edges = pd.read_csv(run_directory / "edges.csv")
-    assert len(edges) == 3
-    assert set(edges["weight"]) == {8.0}
-    assert edges["sppmi"].isna().all()
-    assert edges["z_score"].isna().all()
-    experiment_text = (tmp_path / "cached-experiments.md").read_text(encoding="utf-8")
-    assert "数据与过滤漏斗" in experiment_text
-    assert "有效社区覆盖率" in experiment_text
-    assert "SPPMI阶段（已跳过）" in experiment_text
-    assert "SPPMI_PARAMETERS_ACTIVE = False" in experiment_text
-
-    collision_time = datetime(2026, 6, 22, 14, 30, 0).astimezone()
-    collision_directory = create_run_directory(
-        tmp_path / "collision-output",
-        load_config(config_path),
-        collision_time,
-    )
-    assert collision_directory.exists()
-    assert collision_directory.name == "transaction_count_leiden_260622143000"
-    with pytest.raises(AlgorithmError, match="拒绝覆盖"):
-        create_run_directory(
-            tmp_path / "collision-output",
-            load_config(config_path),
-            collision_time,
-        )
+    with pytest.raises(TransactionDataError, match="重复流水号"):
+        load_transactions(load_config(config_path).input)
 
 
 def test_cds_pmi_matches_base_pmi_when_alpha_is_one() -> None:
@@ -266,6 +203,98 @@ def test_transaction_count_graph_uses_supported_pair_strength() -> None:
     assert "z_score" not in graph.edges["a", "b"]
 
 
+def test_chain_like_merchants_use_candidate_community_votes() -> None:
+    graph = nx.Graph()
+    graph.add_edge("a", "b", weight=10.0, support=3)
+    graph.add_edge("c", "d", weight=10.0, support=3)
+    graph.add_edge("chain", "a", weight=10.0, support=3)
+    cleaning = CleaningResult(
+        graph=graph,
+        partition={"a": 0, "b": 0, "chain": 0, "c": 1, "d": 1},
+        statuses={
+            "a": "active",
+            "b": "active",
+            "chain": "active",
+            "c": "active",
+            "d": "active",
+        },
+        cleaning_rounds=0,
+    )
+
+    merchants = build_merchant_results(
+        cleaning,
+        PairStatistics(
+            strengths={},
+            supports={},
+            merchant_visit_counts={"a": 5, "b": 5, "chain": 200, "c": 5, "d": 5},
+        ),
+        AnchorConfig(
+            minimum_count=1,
+            maximum_count=2,
+            merchants_per_anchor=2,
+            minimum_community_size=1,
+            maximum_participation=0.3,
+            chain_visit_count_quantile=0.8,
+            chain_minimum_visit_count=100,
+        ),
+        {"chain": {0: 0.9, 1: 0.1}},
+        "test",
+    )
+    chain_rows = merchants.loc[merchants["merchant_id"] == "chain"]
+
+    assert set(chain_rows["community_id"].astype(int)) == {0, 1}
+    assert int(chain_rows["is_chain_like"].max()) == 1
+    assert set(chain_rows["chain_reason"].astype(str)) == {"visit_count"}
+    assert int(chain_rows["is_multi_community_member"].max()) == 1
+    assert int(chain_rows["is_anchor_candidate"].sum()) == 0
+
+
+def test_normal_merchants_use_final_graph_community_shares() -> None:
+    graph = nx.Graph()
+    graph.add_edge("a", "b", weight=10.0, support=3)
+    graph.add_edge("c", "d", weight=10.0, support=3)
+    graph.add_edge("bridge", "a", weight=1.0, support=3)
+    graph.add_edge("bridge", "c", weight=1.0, support=3)
+    cleaning = CleaningResult(
+        graph=graph,
+        partition={"a": 0, "b": 0, "bridge": 0, "c": 1, "d": 1},
+        statuses={
+            "a": "active",
+            "b": "active",
+            "bridge": "active",
+            "c": "active",
+            "d": "active",
+        },
+        cleaning_rounds=0,
+    )
+
+    merchants = build_merchant_results(
+        cleaning,
+        PairStatistics(
+            strengths={},
+            supports={},
+            merchant_visit_counts={"a": 5, "b": 5, "bridge": 10, "c": 5, "d": 5},
+        ),
+        AnchorConfig(
+            minimum_count=1,
+            maximum_count=2,
+            merchants_per_anchor=2,
+            minimum_community_size=1,
+            maximum_participation=0.99,
+            chain_visit_count_quantile=1.0,
+            chain_minimum_visit_count=100,
+        ),
+        {},
+        "test",
+    )
+    bridge_rows = merchants.loc[merchants["merchant_id"] == "bridge"]
+
+    assert set(bridge_rows["community_id"].astype(int)) == {0, 1}
+    assert set(bridge_rows["community_share"].round(6)) == {0.5}
+    assert int(bridge_rows["is_chain_like"].max()) == 0
+    assert int(bridge_rows["is_multi_community_member"].max()) == 1
+
+
 def test_leiden_communities_are_connected_and_deterministic() -> None:
     graph = nx.Graph()
     graph.add_weighted_edges_from(
@@ -301,21 +330,44 @@ def test_leiden_communities_are_connected_and_deterministic() -> None:
     )
 
 
-def test_pipeline_writes_city_scoped_outputs(tmp_path: Path) -> None:
+def test_pipeline_writes_business_output_only(tmp_path: Path) -> None:
     transaction_path = tmp_path / "data.txt"
     rows: list[str] = []
     for user_index in range(8):
         rows.extend(
             [
-                f"u{user_index}|t{user_index}a|a|20260101T10{user_index:02d}00|||上海|||",
-                f"u{user_index}|t{user_index}b|b|20260101T10{user_index + 10:02d}00|||上海|||",
-                f"u{user_index}|t{user_index}c|c|20260101T10{user_index + 20:02d}00|||上海|||",
+                _transaction_row(
+                    f"u{user_index}",
+                    f"f{user_index}a",
+                    "a",
+                    f"20260101T10{user_index:02d}00",
+                    "上海",
+                    "20260101",
+                ),
+                _transaction_row(
+                    f"u{user_index}",
+                    f"f{user_index}b",
+                    "b",
+                    f"20260101T10{user_index + 10:02d}00",
+                    "上海",
+                    "20260101",
+                ),
+                _transaction_row(
+                    f"u{user_index}",
+                    f"f{user_index}c",
+                    "c",
+                    f"20260101T10{user_index + 20:02d}00",
+                    "上海",
+                    "20260101",
+                ),
             ]
         )
-    transaction_path.write_text("\n".join(rows), encoding="utf-8")
+    rows.append(_transaction_row("u9", "f9a", "a", "20260102T100000", "浦东", "20260102"))
+    rows.append(_transaction_row("u10", "f10d", "d", "20260101T100000", "上海", "20260101"))
+    _write_transaction_file(transaction_path, rows)
 
     output_path = tmp_path / "output"
-    config_path = tmp_path / "city.toml"
+    config_path = tmp_path / "city.ini"
     config_path.write_text(
         f"""
 [city]
@@ -355,6 +407,9 @@ minimum_count = 1
 maximum_count = 2
 merchants_per_anchor = 2
 minimum_community_size = 2
+maximum_participation = 0.99
+chain_visit_count_quantile = 1.0
+chain_minimum_visit_count = 100
 
 [output]
 directory = "{output_path.as_posix()}"
@@ -367,23 +422,62 @@ path = "{(tmp_path / 'experiments.md').as_posix()}"
 
     summary = run_algorithm_one(load_config(config_path))
 
-    assert summary.merchant_count == 3
-    assert summary.community_count >= 1
     run_directory = Path(summary.output_directory)
     assert run_directory.parent == output_path
     assert re.fullmatch(r"transaction_count_leiden_\d{12}", run_directory.name)
-    assert (run_directory / "merchants.csv").exists()
-    assert (run_directory / "communities.csv").exists()
-    assert (run_directory / "edges.csv").exists()
-    assert (run_directory / "graph.graphml").exists()
-    assert (run_directory / "summary.json").exists()
-    summary_data = json.loads(
-        (run_directory / "summary.json").read_text(encoding="utf-8")
-    )
-    assert summary_data["community_algorithm"] == "leiden"
-    assert summary_data["edge_weight_method"] == "transaction_count"
-    edges = pd.read_csv(run_directory / "edges.csv")
-    assert "sppmi" in edges.columns
+    assert sorted(path.name for path in run_directory.iterdir()) == [
+        "business_district.csv",
+        "pair_statistics.sqlite3",
+    ]
+    assert summary.merchant_count == 4
+    assert summary.community_count == 1
+
+    result = pd.read_csv(run_directory / "business_district.csv")
+    assert list(result.columns) == [
+        "storename",
+        "primary_community_id",
+        "community_id",
+        "previous_community_id",
+        "region",
+        "is_interfere",
+        "update_time",
+        "status",
+        "is_position",
+        "community_share",
+        "is_primary_community",
+        "is_multi_community_member",
+        "is_chain_like",
+        "chain_reason",
+        "chain_visit_count_threshold",
+        "connected_community_count",
+        "dt",
+    ]
+    assert set(result["storename"]) == {"a", "b", "c", "d"}
+    assert set(result["status"]) == {"normal", "suspect_isolated"}
+    assert "suspect_lost" not in set(result["status"])
+    assert set(result["is_interfere"]) == {0}
+    assert result["update_time"].str.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}").all()
+    merchant_a = result.loc[result["storename"].eq("a")].iloc[0]
+    merchant_d = result.loc[result["storename"].eq("d")].iloc[0]
+    assert merchant_a["region"] == "浦东"
+    assert str(merchant_a["dt"]) == "20260102"
+    assert merchant_a["status"] == "normal"
+    assert merchant_d["status"] == "suspect_isolated"
+    assert pd.isna(merchant_d["community_id"])
+    assert merchant_a["is_chain_like"] == 0
+    assert merchant_a["is_primary_community"] == 1
+    assert merchant_a["community_share"] == 1.0
+    assert merchant_a["chain_visit_count_threshold"] == 100
+
+    connection = sqlite3.connect(str(run_directory / "pair_statistics.sqlite3"))
+    try:
+        pair_count = connection.execute("SELECT COUNT(*) FROM merchant_pairs").fetchone()[0]
+        visit_count = connection.execute("SELECT COUNT(*) FROM merchant_visits").fetchone()[0]
+    finally:
+        connection.close()
+    assert pair_count == 3
+    assert visit_count == 4
+
     experiment_text = (tmp_path / "experiments.md").read_text(encoding="utf-8")
-    assert "从原始交易执行Leiden聚类" in experiment_text
-    assert "有效社区覆盖率" in experiment_text
+    assert "原始交易" in experiment_text
+    assert "连锁/泛客群商户" in experiment_text
