@@ -118,7 +118,7 @@ def _visit_count_quantile_threshold(
     return int(ordered[index])
 
 
-def _chain_visit_count_threshold(
+def calculate_chain_visit_count_threshold(
     visit_counts: list[int],
     anchor_config: AnchorConfig,
 ) -> int:
@@ -127,6 +127,17 @@ def _chain_visit_count_threshold(
         anchor_config.chain_visit_count_quantile,
     )
     return max(anchor_config.chain_minimum_visit_count, quantile_threshold)
+
+
+def identify_chain_like_merchants(
+    merchant_visit_counts: dict[str, int],
+    chain_visit_count_threshold: int,
+) -> set[str]:
+    return {
+        merchant_id
+        for merchant_id, visit_count in merchant_visit_counts.items()
+        if int(visit_count) >= chain_visit_count_threshold
+    }
 
 
 def _connected_community_count(
@@ -141,14 +152,9 @@ def _connected_community_count(
 
 
 def _chain_reason(
-    high_participation: bool,
-    high_visit_count: bool,
+    is_chain_like: bool,
 ) -> str:
-    if high_participation and high_visit_count:
-        return "participation|visit_count"
-    if high_participation:
-        return "participation"
-    if high_visit_count:
+    if is_chain_like:
         return "visit_count"
     return ""
 
@@ -156,7 +162,7 @@ def _chain_reason(
 def _add_chain_like_flags(
     merchants: pd.DataFrame,
     community_shares: dict[str, dict[int, float]],
-    anchor_config: AnchorConfig,
+    chain_like_merchant_ids: set[str],
     chain_visit_count_threshold: int,
 ) -> pd.DataFrame:
     if merchants.empty:
@@ -173,21 +179,77 @@ def _add_chain_like_flags(
         for merchant_id in enriched["merchant_id"].tolist()
     ]
     enriched["chain_visit_count_threshold"] = chain_visit_count_threshold
-    high_participation = (
-        enriched["participation"].astype(float) > anchor_config.maximum_participation
+    is_chain_like = [
+        str(merchant_id) in chain_like_merchant_ids
+        for merchant_id in enriched["merchant_id"].tolist()
+    ]
+    enriched["is_chain_like"] = pd.Series(is_chain_like, index=enriched.index).astype(
+        int
     )
-    high_visit_count = (
-        enriched["visit_count"].astype(int) >= chain_visit_count_threshold
-    )
-    enriched["is_chain_like"] = (high_participation | high_visit_count).astype(int)
     enriched["chain_reason"] = [
-        _chain_reason(bool(participation_flag), bool(visit_flag))
-        for participation_flag, visit_flag in zip(
-            high_participation.tolist(),
-            high_visit_count.tolist(),
-        )
+        _chain_reason(chain_flag)
+        for chain_flag in is_chain_like
     ]
     return enriched
+
+
+def _primary_community_id(shares: dict[int, float]) -> int:
+    if not shares:
+        return -1
+    return sorted(shares.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+
+def _chain_participation(shares: dict[int, float]) -> float:
+    if not shares:
+        return 0.0
+    return 1.0 - sum(share**2 for share in shares.values())
+
+
+def _build_chain_membership_rows(
+    chain_like_merchant_ids: set[str],
+    statistics: PairStatistics,
+    candidate_community_shares: dict[str, dict[int, float]],
+    city_code: str,
+    chain_visit_count_threshold: int,
+) -> list[dict[str, str | int | float]]:
+    rows: list[dict[str, str | int | float]] = []
+    for merchant_id in sorted(chain_like_merchant_ids):
+        shares = candidate_community_shares.get(merchant_id, {})
+        primary_community_id = _primary_community_id(shares)
+        community_ids = sorted(shares) if shares else [-1]
+        is_multi_community_member = int(len(community_ids) > 1)
+        connected_community_count = len(shares)
+        merchant_status = (
+            "active"
+            if primary_community_id >= 0
+            else "suspect_isolated"
+        )
+        for community_id in community_ids:
+            rows.append(
+                {
+                    "city_code": city_code,
+                    "merchant_id": merchant_id,
+                    "primary_community_id": primary_community_id,
+                    "community_id": int(community_id),
+                    "merchant_status": merchant_status,
+                    "is_anchor_candidate": 0,
+                    "anchor_score": 0.0,
+                    "pagerank": 0.0,
+                    "participation": _chain_participation(shares),
+                    "weighted_degree": 0.0,
+                    "community_share": float(shares.get(community_id, 0.0)),
+                    "is_primary_community": int(community_id == primary_community_id),
+                    "is_multi_community_member": is_multi_community_member,
+                    "connected_community_count": connected_community_count,
+                    "chain_visit_count_threshold": chain_visit_count_threshold,
+                    "is_chain_like": 1,
+                    "chain_reason": "visit_count",
+                    "visit_count": int(
+                        statistics.merchant_visit_counts.get(merchant_id, 0)
+                    ),
+                }
+            )
+    return rows
 
 
 def build_merchant_results(
@@ -195,6 +257,8 @@ def build_merchant_results(
     statistics: PairStatistics,
     anchor_config: AnchorConfig,
     candidate_community_shares: dict[str, dict[int, float]],
+    chain_like_merchant_ids: set[str],
+    chain_visit_count_threshold: int,
     city_code: str,
 ) -> pd.DataFrame:
     participation = calculate_participation(cleaning.graph, cleaning.partition)
@@ -202,15 +266,10 @@ def build_merchant_results(
         cleaning.graph,
         cleaning.partition,
     )
-    chain_visit_count_threshold = _chain_visit_count_threshold(
-        [
-            int(visit_count)
-            for visit_count in statistics.merchant_visit_counts.values()
-        ],
-        anchor_config,
-    )
     communities: dict[int, list[str]] = {}
     for merchant_id, community_id in cleaning.partition.items():
+        if merchant_id in chain_like_merchant_ids:
+            continue
         communities.setdefault(community_id, []).append(merchant_id)
 
     centrality_by_merchant: dict[str, float] = {}
@@ -227,6 +286,8 @@ def build_merchant_results(
     rows: list[dict[str, str | int | float]] = []
 
     for merchant_id, community_id in cleaning.partition.items():
+        if merchant_id in chain_like_merchant_ids:
+            continue
         centrality = centrality_by_merchant[merchant_id]
         anchor_score = centrality * (
             1.0 - participation.get(merchant_id, 0.0)
@@ -254,7 +315,7 @@ def build_merchant_results(
     result = _add_chain_like_flags(
         result,
         community_shares,
-        anchor_config,
+        chain_like_merchant_ids,
         chain_visit_count_threshold,
     )
     if not result.empty:
@@ -263,7 +324,13 @@ def build_merchant_results(
             if len(group) < anchor_config.minimum_community_size:
                 continue
             count = _anchor_count(len(group), anchor_config)
-            eligible = group.loc[group["is_chain_like"] == 0]
+            eligible = group.loc[
+                (group["is_chain_like"] == 0)
+                & (
+                    group["participation"].astype(float)
+                    <= anchor_config.maximum_participation
+                )
+            ]
             ordered = eligible.sort_values(
                 ["anchor_score", "weighted_degree", "visit_count", "merchant_id"],
                 ascending=[False, False, False, True],
@@ -276,6 +343,16 @@ def build_merchant_results(
         community_shares,
         candidate_community_shares,
     )
+
+    chain_rows = _build_chain_membership_rows(
+        chain_like_merchant_ids,
+        statistics,
+        candidate_community_shares,
+        city_code,
+        chain_visit_count_threshold,
+    )
+    if chain_rows:
+        result = pd.concat([result, pd.DataFrame(chain_rows)], ignore_index=True)
 
     removed_rows = [
         {
@@ -294,22 +371,14 @@ def build_merchant_results(
             "is_multi_community_member": 0,
             "connected_community_count": 0,
             "chain_visit_count_threshold": chain_visit_count_threshold,
-            "is_chain_like": int(
-                statistics.merchant_visit_counts.get(merchant_id, 0)
-                >= chain_visit_count_threshold
-            ),
-            "chain_reason": (
-                "visit_count"
-                if statistics.merchant_visit_counts.get(merchant_id, 0)
-                >= chain_visit_count_threshold
-                else ""
-            ),
+            "is_chain_like": 0,
+            "chain_reason": "",
             "visit_count": int(
                 statistics.merchant_visit_counts.get(merchant_id, 0)
             ),
         }
         for merchant_id, status in cleaning.statuses.items()
-        if status == "suspect_online"
+        if status == "suspect_online" and merchant_id not in chain_like_merchant_ids
     ]
     if removed_rows:
         result = pd.concat([result, pd.DataFrame(removed_rows)], ignore_index=True)

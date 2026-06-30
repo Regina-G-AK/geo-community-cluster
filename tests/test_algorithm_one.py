@@ -207,14 +207,12 @@ def test_chain_like_merchants_use_candidate_community_votes() -> None:
     graph = nx.Graph()
     graph.add_edge("a", "b", weight=10.0, support=3)
     graph.add_edge("c", "d", weight=10.0, support=3)
-    graph.add_edge("chain", "a", weight=10.0, support=3)
     cleaning = CleaningResult(
         graph=graph,
-        partition={"a": 0, "b": 0, "chain": 0, "c": 1, "d": 1},
+        partition={"a": 0, "b": 0, "c": 1, "d": 1},
         statuses={
             "a": "active",
             "b": "active",
-            "chain": "active",
             "c": "active",
             "d": "active",
         },
@@ -238,6 +236,8 @@ def test_chain_like_merchants_use_candidate_community_votes() -> None:
             chain_minimum_visit_count=100,
         ),
         {"chain": {0: 0.9, 1: 0.1}},
+        {"chain"},
+        100,
         "test",
     )
     chain_rows = merchants.loc[merchants["merchant_id"] == "chain"]
@@ -285,6 +285,8 @@ def test_normal_merchants_use_final_graph_community_shares() -> None:
             chain_minimum_visit_count=100,
         ),
         {},
+        set(),
+        100,
         "test",
     )
     bridge_rows = merchants.loc[merchants["merchant_id"] == "bridge"]

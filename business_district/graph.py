@@ -179,6 +179,10 @@ def calculate_candidate_community_weight_shares(
         if left in partition and right in partition:
             weights_by_merchant[left][partition[right]] += weight
             weights_by_merchant[right][partition[left]] += weight
+        elif left in partition and right not in partition:
+            weights_by_merchant[right][partition[left]] += weight
+        elif right in partition and left not in partition:
+            weights_by_merchant[left][partition[right]] += weight
     return _normalize_community_weights(weights_by_merchant)
 
 

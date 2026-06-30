@@ -8,3 +8,5 @@ data.txt
 
 __pycache__/
 *.pyc
+
+.obsidian/

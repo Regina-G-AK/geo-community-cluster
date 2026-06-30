@@ -94,7 +94,7 @@ def test_sparse_graph_filters_edges_by_jaccard() -> None:
     assert graph.edges["a", "b"]["jaccard"] == 0.25
 
 
-def test_high_participation_merchants_are_multi_community_members_not_anchors() -> None:
+def test_high_participation_merchants_are_not_anchor_candidates() -> None:
     graph = nx.Graph()
     graph.add_edge("a", "b", weight=10.0, support=3)
     graph.add_edge("c", "d", weight=10.0, support=3)
@@ -122,12 +122,15 @@ def test_high_participation_merchants_are_multi_community_members_not_anchors() 
         ),
         _anchor_config(0.3, 1.0, 100),
         {},
+        set(),
+        100,
         "test",
     )
     chain_rows = merchants.loc[merchants["merchant_id"] == "chain"]
 
-    assert set(chain_rows["community_id"].astype(int)) == {0, 1}
-    assert int(chain_rows["is_multi_community_member"].max()) == 1
+    assert set(chain_rows["community_id"].astype(int)) == {0}
+    assert int(chain_rows["is_chain_like"].max()) == 0
+    assert int(chain_rows["is_multi_community_member"].max()) == 0
     assert int(chain_rows["is_anchor_candidate"].sum()) == 0
 
 
@@ -135,14 +138,12 @@ def test_high_visit_count_merchants_are_chain_like_without_community_count_gate(
     graph = nx.Graph()
     graph.add_edge("a", "b", weight=10.0, support=3)
     graph.add_edge("c", "d", weight=10.0, support=3)
-    graph.add_edge("chain", "a", weight=10.0, support=3)
     cleaning = CleaningResult(
         graph=graph,
-        partition={"a": 0, "b": 0, "chain": 0, "c": 1, "d": 1},
+        partition={"a": 0, "b": 0, "c": 1, "d": 1},
         statuses={
             "a": "active",
             "b": "active",
-            "chain": "active",
             "c": "active",
             "d": "active",
         },
@@ -157,7 +158,9 @@ def test_high_visit_count_merchants_are_chain_like_without_community_count_gate(
             merchant_visit_counts={"a": 5, "b": 5, "chain": 200, "c": 5, "d": 5},
         ),
         _anchor_config(0.3, 0.8, 100),
-        {},
+        {"chain": {0: 1.0}},
+        {"chain"},
+        100,
         "test",
     )
     chain_rows = merchants.loc[merchants["merchant_id"] == "chain"]
@@ -172,14 +175,12 @@ def test_high_visit_count_merchants_use_candidate_edges_for_multi_community_memb
     graph = nx.Graph()
     graph.add_edge("a", "b", weight=10.0, support=3)
     graph.add_edge("c", "d", weight=10.0, support=3)
-    graph.add_edge("chain", "a", weight=10.0, support=3)
     cleaning = CleaningResult(
         graph=graph,
-        partition={"a": 0, "b": 0, "chain": 0, "c": 1, "d": 1},
+        partition={"a": 0, "b": 0, "c": 1, "d": 1},
         statuses={
             "a": "active",
             "b": "active",
-            "chain": "active",
             "c": "active",
             "d": "active",
         },
@@ -195,6 +196,8 @@ def test_high_visit_count_merchants_use_candidate_edges_for_multi_community_memb
         ),
         _anchor_config(0.3, 0.8, 100),
         {"chain": {0: 0.9, 1: 0.1}},
+        {"chain"},
+        100,
         "test",
     )
     chain_rows = merchants.loc[merchants["merchant_id"] == "chain"]

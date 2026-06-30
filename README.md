@@ -26,6 +26,26 @@ notebooks/run_hive_business_district.ipynb
 
 notebook 通过 `HiveTaskConfig` 显式传入配置路径、输入表、输出表、临时表和 `dt_expression`，再调用 `run_hive_task(task_config)`，不复制算法逻辑。
 
+## 商圈图生成
+
+独立画图脚本读取 `merchants.csv` 并按 `community_id` 为每个商圈生成一张 SVG 图。输入文件需要包含以下字段：
+
+- `merchant_id`：商户名称。
+- `community_id`：商圈 ID。
+- `is_anchor_candidate`：是否为锚点商户，`0` 表示普通商户，`1` 表示锚点商户。
+
+在 `merchants.csv` 所在目录运行默认命令：
+
+```powershell
+python scripts/draw_community_graphs.py
+```
+
+默认会生成 `community_graphs_YYYYMMDD_HHMMSS` 输出目录。也可以显式指定输入文件和输出目录：
+
+```powershell
+python scripts/draw_community_graphs.py merchants.csv community_graphs
+```
+
 ## 输入
 
 交易文件需要包含表头，字段如下：
@@ -81,10 +101,10 @@ business_district.csv
 - `community_share` 表示商户挂靠到本行商圈的边权占比。
 - `is_primary_community` 表示本行是否为商户主社区。
 - `is_multi_community_member` 表示商户是否被展开到多个商圈。
-- `is_chain_like` 表示是否命中连锁/泛客群规则。
-- `chain_reason` 为空、`participation`、`visit_count` 或 `participation|visit_count`。
+- `is_chain_like` 表示是否在聚类前命中访问量型连锁/泛客群规则。
+- `chain_reason` 为空或 `visit_count`。
 - `chain_visit_count_threshold` 是本次运行访问量规则使用的阈值。
-- `connected_community_count` 是商户在最终清洗图中连接到的社区数。
+- `connected_community_count` 是普通商户在最终清洗图中连接到的社区数；连锁/泛客群商户使用聚类前候选边连接到的已有商圈数。
 
 同一运行目录还会写入商户对中间文件：
 
@@ -145,6 +165,6 @@ python -m pytest
 
 - `[graph].degree_penalty_gamma`：按端点候选邻居度数惩罚 SPPMI 边权，当前建议 `0.0`，先退回原始 SPPMI，避免连锁店跨商圈边被过度压低。
 - `[graph].jaccard_threshold`：边两端候选邻居集合的 Jaccard 结构门槛，当前建议 `0.0`，先保留低重叠的跨商圈边用于识别多商圈普通成员。
-- `[anchors].maximum_participation`：锚点候选最大参与系数，当前建议 `0.1`，超过该阈值的商户不能成为锚点，并会作为普通成员按连接社区展开到多个商圈。
-- `[anchors].chain_visit_count_quantile`：访问量型连锁/泛客群规则的分位阈值，当前建议 `0.9`，即取访问量最高的约 10% 商户。
-- `[anchors].chain_minimum_visit_count`：访问量型规则的绝对访问次数下限，当前建议 `100`。
+- `[anchors].maximum_participation`：锚点候选最大参与系数，当前建议 `0.1`，超过该阈值的非连锁商户不能成为锚点。
+- `[anchors].chain_visit_count_quantile`：聚类前访问量型连锁/泛客群规则的分位阈值，当前建议 `0.9`，即取访问量最高的约 10% 商户。
+- `[anchors].chain_minimum_visit_count`：聚类前访问量型规则的绝对访问次数下限，当前建议 `100`。

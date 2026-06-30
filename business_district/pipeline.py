@@ -21,7 +21,9 @@ from business_district.results import (
     build_business_results,
     build_community_results,
     build_merchant_results,
+    calculate_chain_visit_count_threshold,
     filter_merchants_by_community_size,
+    identify_chain_like_merchants,
     write_outputs,
 )
 from business_district.run_directory import create_run_directory
@@ -76,13 +78,27 @@ def run_algorithm_one_from_transactions(
         config.cooccurrence,
         config.graph,
     )
-    cleaning: CleaningResult = clean_graph(graph, config.community)
+    chain_visit_count_threshold = calculate_chain_visit_count_threshold(
+        [
+            int(visit_count)
+            for visit_count in statistics.merchant_visit_counts.values()
+        ],
+        config.anchors,
+    )
+    chain_like_merchant_ids = identify_chain_like_merchants(
+        statistics.merchant_visit_counts,
+        chain_visit_count_threshold,
+    )
+    clustering_graph = graph.copy()
+    clustering_graph.remove_nodes_from(chain_like_merchant_ids)
+    cleaning: CleaningResult = clean_graph(clustering_graph, config.community)
+    edge_candidates = calculate_edge_candidates(
+        statistics,
+        config.cooccurrence,
+        config.graph,
+    )
     candidate_community_shares = calculate_candidate_community_weight_shares(
-        calculate_edge_candidates(
-            statistics,
-            config.cooccurrence,
-            config.graph,
-        ),
+        edge_candidates,
         cleaning.partition,
     )
     raw_merchants = build_merchant_results(
@@ -90,6 +106,8 @@ def run_algorithm_one_from_transactions(
         statistics,
         config.anchors,
         candidate_community_shares,
+        chain_like_merchant_ids,
+        chain_visit_count_threshold,
         config.city.code,
     )
     merchants = filter_merchants_by_community_size(raw_merchants)
