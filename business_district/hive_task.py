@@ -173,10 +173,10 @@ class TaskMain:
             logrecord.log_data(f"task dt={self.dt_var}")
             dt_list = [self.dt_var]
             print(dt_list)
-            source_db, source_table = _split_hive_table(
-                self.task_config.source_table
-            )
-            source_data = sd.read_table(source_db, source_table, dt=dt_list)
+            # source_db, source_table = _split_hive_table(
+            #     self.task_config.source_table
+            # )
+            source_data = sd.read_table(self.task_config.source_table, dt=dt_list)
             source_data.columns = source_data.columns.astype("string").str.strip()
             config = load_config(self.task_config.config_path)
             transactions = load_hive_transactions(
