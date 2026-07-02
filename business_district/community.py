@@ -1,0 +1,145 @@
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass
+
+import igraph as ig
+import leidenalg as la
+import networkx as nx
+
+from business_district.config import CommunityConfig
+
+
+@dataclass(frozen=True)
+class CleaningResult:
+    graph: nx.Graph
+    partition: dict[str, int]
+    statuses: dict[str, str]
+    cleaning_rounds: int
+
+
+def detect_communities(
+    graph: nx.Graph,
+    resolution: float,
+    random_seed: int,
+) -> dict[str, int]:
+    connected_nodes = sorted(node for node in graph if graph.degree(node) > 0)
+    isolated_nodes = sorted(node for node in graph if graph.degree(node) == 0)
+    connected_graph = graph.subgraph(connected_nodes).copy()
+
+    communities: list[set[str]] = []
+    if connected_graph.number_of_nodes() > 0:
+        node_ids = [str(node) for node in connected_nodes]
+        node_indices = {
+            node_id: node_index
+            for node_index, node_id in enumerate(node_ids)
+        }
+        networkx_edges = list(connected_graph.edges(data=True))
+        igraph_graph = ig.Graph(
+            n=len(node_ids),
+            edges=[
+                (node_indices[str(left)], node_indices[str(right)])
+                for left, right, _ in networkx_edges
+            ],
+            directed=False,
+        )
+        igraph_graph.vs["name"] = node_ids
+        weights = [float(edge_data["weight"]) for _, _, edge_data in networkx_edges]
+        partition = la.find_partition(
+            igraph_graph,
+            la.RBConfigurationVertexPartition,
+            weights=weights,
+            resolution_parameter=resolution,
+            seed=random_seed,
+        )
+        communities = [
+            {node_ids[node_index] for node_index in community}
+            for community in partition
+        ]
+    communities.extend({node} for node in isolated_nodes)
+    ordered = sorted(
+        communities,
+        key=lambda members: (-len(members), min(str(member) for member in members)),
+    )
+    return {
+        str(node): community_id
+        for community_id, members in enumerate(ordered)
+        for node in members
+    }
+
+
+def calculate_participation(
+    graph: nx.Graph,
+    partition: dict[str, int],
+) -> dict[str, float]:
+    community_shares = calculate_community_weight_shares(graph, partition)
+    return {
+        merchant_id: 1.0 - sum(share**2 for share in shares.values())
+        for merchant_id, shares in community_shares.items()
+    }
+
+
+def calculate_community_weight_shares(
+    graph: nx.Graph,
+    partition: dict[str, int],
+) -> dict[str, dict[int, float]]:
+    shares_by_merchant: dict[str, dict[int, float]] = {}
+    for node in graph:
+        weight_by_community: dict[int, float] = defaultdict(float)
+        total_weight = 0.0
+        for neighbor, edge_data in graph[node].items():
+            weight = float(edge_data["weight"])
+            total_weight += weight
+            weight_by_community[partition[neighbor]] += weight
+        if total_weight == 0:
+            shares_by_merchant[str(node)] = {partition[str(node)]: 1.0}
+            continue
+        shares_by_merchant[str(node)] = {
+            community_id: weight / total_weight
+            for community_id, weight in weight_by_community.items()
+        }
+    return shares_by_merchant
+
+
+def clean_graph(
+    graph: nx.Graph,
+    config: CommunityConfig,
+) -> CleaningResult:
+    working_graph = graph.copy()
+    statuses = {
+        str(node): "suspect_isolated" if graph.degree(node) == 0 else "active"
+        for node in graph
+    }
+    completed_rounds = 0
+
+    for round_index in range(config.maximum_cleaning_rounds):
+        partition = detect_communities(
+            working_graph,
+            config.resolution,
+            config.random_seed,
+        )
+        participation = calculate_participation(working_graph, partition)
+        hubs = [
+            str(node)
+            for node in working_graph
+            if working_graph.degree(node) >= config.minimum_hub_degree
+            and participation[str(node)] >= config.participation_threshold
+        ]
+        if not hubs:
+            break
+        working_graph.remove_nodes_from(hubs)
+        for node in hubs:
+            statuses[node] = "suspect_online"
+        completed_rounds = round_index + 1
+
+    final_partition = detect_communities(
+        working_graph,
+        config.resolution,
+        config.random_seed,
+    )
+    return CleaningResult(
+        graph=working_graph,
+        partition=final_partition,
+        statuses=statuses,
+        cleaning_rounds=completed_rounds,
+    )

@@ -1,0 +1,15 @@
+{
+  "city_code": "shanghai",
+  "merchant_count": 192546,
+  "community_count": 170960,
+  "community_count_ge_3": 1261,
+  "community_count_ge_10": 311,
+  "edge_count": 35137,
+  "suspect_online_count": 0,
+  "suspect_isolated_count": 167617,
+  "anchor_candidate_count": 4088,
+  "cleaning_rounds": 0,
+  "community_algorithm": "leiden",
+  "edge_weight_method": "sppmi",
+  "source": "pair_statistics"
+}
