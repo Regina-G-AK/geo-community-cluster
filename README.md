@@ -26,6 +26,14 @@ notebooks/run_hive_business_district.ipynb
 
 notebook 通过 `HiveTaskConfig` 显式传入配置路径、输入表、输出表、临时表和 `dt_expression`，再调用 `run_hive_task(task_config)`，不复制算法逻辑。
 
+增量归属 Hive 入口用于把新商户追加归入已有商圈：
+
+```powershell
+python -m incremental_assignment.hive_task
+```
+
+该入口读取 `dev_icamp.icamp_merchant_cluster_algo_input` 的 T-1 分区，并读取 `dev_icamp.icamp_cluster_algo_output` 的同日商圈结果作为已有商圈表。已有输出表中已经存在的商户不会重新计算，也不会覆盖写入；任务只对输入表里尚未出现在输出表的商户做增量归属，并通过临时表加 `insert into table` 追加到 `dev_icamp.icamp_cluster_algo_output`。新商户不要求经纬度，入口会复用 `configs/shanghai.ini` 中的到访合并、共现窗口、SPPMI 和互为 top-k 参数计算交易共现图；再按新商户连接到的存量商户商圈标签做加权投票，锚点商户票权使用 `[assignment].anchor_vote_weight` 放大。若最高商圈分数不低于 `[assignment].theta`，且与次高商圈分数差值不低于 `[assignment].delta`，则归入最高分商圈；否则输出 `is_abnormal=suspect_isolated` 且商圈 ID 为空。商圈表必须提供 `community_id`、`storename`、`is_position` 和 `is_abnormal`，其中 `is_abnormal=normal` 且 `community_id` 非空的记录作为存量成员标签，`is_position=1` 的记录作为锚点加权票。
+
 ## 商圈图生成
 
 独立画图脚本读取 `merchants.csv` 并按 `community_id` 为每个商圈生成一张 SVG 图。输入文件需要包含以下字段：
@@ -148,8 +156,9 @@ Hive 入口写入目标表字段为：
 初始化聚类只输出以下状态：
 
 - `normal`：商户进入有效商圈。
-- `suspect_isolated`：商户没有有效边，或所在社区未达到有效商圈规模。
+- `suspect_isolated`：初始化聚类时商户没有有效边或所在社区未达到配置项 `anchors.minimum_community_size` 定义的有效商圈规模；增量归属时商户没有指向存量商圈成员的有效 SPPMI 边，或图投票分数未达到归入阈值。
 - `suspect_online`：迭代 hub 清洗阶段识别出的高参与度 hub 商户。
+- `suspect_cross_region`：保留给有坐标来源时的跨区域识别；当前无经纬度增量归属入口不会产出该状态。
 
 `suspect_lost` 不在初始化聚类中输出。
 

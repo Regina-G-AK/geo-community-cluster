@@ -110,7 +110,10 @@ def run_algorithm_one_from_transactions(
         chain_visit_count_threshold,
         config.city.code,
     )
-    merchants = filter_merchants_by_community_size(raw_merchants)
+    merchants = filter_merchants_by_community_size(
+        raw_merchants,
+        config.anchors.minimum_community_size,
+    )
     communities = build_community_results(
         merchants,
         visits,
@@ -120,6 +123,7 @@ def run_algorithm_one_from_transactions(
         raw_merchants,
         merchant_metadata,
         started_at,
+        config.anchors.minimum_community_size,
     )
     write_outputs(
         output_directory,

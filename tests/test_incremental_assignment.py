@@ -19,6 +19,8 @@ def _config() -> AssignmentConfig:
         geo_weight=0.3,
         customer_weight=0.1,
         minimum_sigma_meters=100.0,
+        community_assignment_distance_meters=3000.0,
+        city_maximum_distance_meters=50000.0,
     )
 
 
@@ -210,4 +212,3 @@ def test_geo_graph_conflict_goes_to_manual_review() -> None:
 
     assert decision.decision == "manual_review"
     assert decision.reason == "图分最高商圈与地理分最高商圈不同"
-

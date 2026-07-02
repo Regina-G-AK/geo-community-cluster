@@ -1,6 +1,7 @@
 import math
 import re
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 import networkx as nx
@@ -22,7 +23,7 @@ from business_district.graph import (
     build_sparse_graph,
 )
 from business_district.pipeline import run_algorithm_one
-from business_district.results import build_merchant_results
+from business_district.results import build_business_results, build_merchant_results
 from business_district.transactions import CARD, MERCHANT, TIMESTAMP, load_transactions
 
 
@@ -295,6 +296,76 @@ def test_normal_merchants_use_final_graph_community_shares() -> None:
     assert set(bridge_rows["community_share"].round(6)) == {0.5}
     assert int(bridge_rows["is_chain_like"].max()) == 0
     assert int(bridge_rows["is_multi_community_member"].max()) == 1
+
+
+def test_business_results_use_configured_minimum_community_size() -> None:
+    merchants = pd.DataFrame(
+        [
+            {
+                "merchant_id": "a",
+                "primary_community_id": 0,
+                "community_id": 0,
+                "merchant_status": "active",
+                "is_anchor_candidate": 1,
+                "community_share": 1.0,
+                "is_primary_community": 1,
+                "is_multi_community_member": 0,
+                "connected_community_count": 1,
+                "chain_visit_count_threshold": 100,
+                "is_chain_like": 0,
+                "chain_reason": "",
+            },
+            {
+                "merchant_id": "b",
+                "primary_community_id": 0,
+                "community_id": 0,
+                "merchant_status": "active",
+                "is_anchor_candidate": 0,
+                "community_share": 1.0,
+                "is_primary_community": 1,
+                "is_multi_community_member": 0,
+                "connected_community_count": 1,
+                "chain_visit_count_threshold": 100,
+                "is_chain_like": 0,
+                "chain_reason": "",
+            },
+            {
+                "merchant_id": "c",
+                "primary_community_id": 1,
+                "community_id": 1,
+                "merchant_status": "active",
+                "is_anchor_candidate": 0,
+                "community_share": 1.0,
+                "is_primary_community": 1,
+                "is_multi_community_member": 0,
+                "connected_community_count": 1,
+                "chain_visit_count_threshold": 100,
+                "is_chain_like": 0,
+                "chain_reason": "",
+            },
+        ]
+    )
+    merchant_metadata = pd.DataFrame(
+        [
+            {MERCHANT: "a", "region": "shanghai", "dt": "20260101"},
+            {MERCHANT: "b", "region": "shanghai", "dt": "20260101"},
+            {MERCHANT: "c", "region": "shanghai", "dt": "20260101"},
+        ]
+    )
+
+    result = build_business_results(
+        merchants,
+        merchant_metadata,
+        datetime(2026, 1, 1, 10, 0, 0),
+        2,
+    )
+
+    valid_rows = result.loc[result["storename"].isin(["a", "b"])]
+    invalid_row = result.loc[result["storename"].eq("c")].iloc[0]
+    assert set(valid_rows["status"]) == {"normal"}
+    assert set(valid_rows["community_id"].astype(int)) == {0}
+    assert invalid_row["status"] == "suspect_isolated"
+    assert invalid_row["community_id"] == ""
 
 
 def test_leiden_communities_are_connected_and_deterministic() -> None:

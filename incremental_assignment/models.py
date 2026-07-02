@@ -29,6 +29,8 @@ class AssignmentConfig:
     geo_weight: float
     customer_weight: float
     minimum_sigma_meters: float
+    community_assignment_distance_meters: float
+    city_maximum_distance_meters: float
 
 
 @dataclass(frozen=True)
@@ -88,4 +90,3 @@ class RunSummary:
     observation_count: int
     manual_review_count: int
     duration_seconds: float
-

@@ -203,12 +203,31 @@ def load_config(path: Path) -> AppConfig:
                 "assignment",
                 0.000001,
             ),
+            community_assignment_distance_meters=_require_float(
+                assignment,
+                "community_assignment_distance_meters",
+                "assignment",
+                0.000001,
+            ),
+            city_maximum_distance_meters=_require_float(
+                assignment,
+                "city_maximum_distance_meters",
+                "assignment",
+                0.000001,
+            ),
         ),
     )
     if app_config.assignment.theta > 1.0:
         raise ConfigurationError("配置项 assignment.theta 不能大于 1")
     if app_config.assignment.delta > 1.0:
         raise ConfigurationError("配置项 assignment.delta 不能大于 1")
+    if (
+        app_config.assignment.community_assignment_distance_meters
+        > app_config.assignment.city_maximum_distance_meters
+    ):
+        raise ConfigurationError(
+            "配置项 assignment.community_assignment_distance_meters "
+            "不能大于 assignment.city_maximum_distance_meters"
+        )
     _validate_weight_sum(app_config.assignment)
     return app_config
-

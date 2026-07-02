@@ -16,7 +16,6 @@ from business_district.config import AnchorConfig
 from business_district.graph import PairStatistics
 from business_district.transactions import DT, MERCHANT, REGION, TIMESTAMP
 
-MINIMUM_OUTPUT_COMMUNITY_SIZE = 3
 COMMUNITY_COLUMNS = [
     "city_code",
     "community_id",
@@ -389,12 +388,15 @@ def build_merchant_results(
     ).reset_index(drop=True)
 
 
-def filter_merchants_by_community_size(merchants: pd.DataFrame) -> pd.DataFrame:
+def filter_merchants_by_community_size(
+    merchants: pd.DataFrame,
+    minimum_community_size: int,
+) -> pd.DataFrame:
     active = merchants.loc[merchants["community_id"] >= 0]
     community_sizes = active.groupby("community_id").size()
     kept_community_ids = set(
         community_sizes.loc[
-            community_sizes >= MINIMUM_OUTPUT_COMMUNITY_SIZE
+            community_sizes >= minimum_community_size
         ].index
     )
     filtered = merchants.loc[
@@ -407,12 +409,13 @@ def build_business_results(
     merchants: pd.DataFrame,
     merchant_metadata: pd.DataFrame,
     update_time: datetime,
+    minimum_community_size: int,
 ) -> pd.DataFrame:
     active = merchants.loc[merchants["community_id"] >= 0]
     community_sizes = active.groupby("community_id").size()
     valid_community_ids = set(
         community_sizes.loc[
-            community_sizes >= MINIMUM_OUTPUT_COMMUNITY_SIZE
+            community_sizes >= minimum_community_size
         ].index
     )
     enriched = merchant_metadata.merge(

@@ -81,9 +81,12 @@ def build_experiment_record(
         dict(Counter(cleaning.partition.values())),
         dtype="int64",
     )
-    valid_community_count = int((community_sizes >= 3).sum())
+    minimum_community_size = config.anchors.minimum_community_size
+    valid_community_count = int((community_sizes >= minimum_community_size).sum())
     large_community_count = int((community_sizes >= 10).sum())
-    valid_merchant_count = int(community_sizes.loc[community_sizes >= 3].sum())
+    valid_merchant_count = int(
+        community_sizes.loc[community_sizes >= minimum_community_size].sum()
+    )
     coverage = valid_merchant_count / total_merchants if total_merchants else 0.0
 
     active_merchants = merchants.loc[merchants["community_id"] >= 0]
@@ -92,7 +95,7 @@ def build_experiment_record(
     ].sum()
     maximum_anchor_count = int(anchor_counts.max()) if not anchor_counts.empty else 0
     invalid_community_ids = set(
-        community_sizes.loc[community_sizes < 3].index.astype(int)
+        community_sizes.loc[community_sizes < minimum_community_size].index.astype(int)
     )
     invalid_anchor_count = int(
         active_merchants.loc[
@@ -194,7 +197,7 @@ def build_experiment_record(
         - 迭代hub清洗后：{cleaning.graph.number_of_edges()}条边，覆盖商户{len(cleaned_connected_merchants)}个
     - 聚类结果：
         - 全部社区：{len(community_sizes)}个，孤立商户{int((community_sizes == 1).sum())}个
-        - 有效社区：{valid_community_count}个（商户数>=3）
+        - 有效社区：{valid_community_count}个（商户数>={minimum_community_size}）
         - 较大社区：{large_community_count}个（商户数>=10）
         - 有效社区商户：{valid_merchant_count}个，占全部商户{coverage:.2%}
         - 候选锚点：{int(merchants['is_anchor_candidate'].sum())}个，单社区最多{maximum_anchor_count}个
