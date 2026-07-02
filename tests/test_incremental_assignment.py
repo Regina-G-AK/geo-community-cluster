@@ -38,7 +38,6 @@ def _candidate(
         customer_ids=frozenset({"u1", "u2", "u3"}),
         latitude=latitude,
         longitude=longitude,
-        hourly_profile=tuple(0 for _ in range(24)),
     )
 
 
@@ -55,7 +54,6 @@ def test_graph_score_uses_anchor_weighted_votes() -> None:
                 "latitude": "",
                 "longitude": "",
                 "customer_ids": "u1|u2",
-                "hourly_profile": "|".join("0" for _ in range(24)),
             },
             {
                 "city_code": "shanghai",
@@ -67,7 +65,6 @@ def test_graph_score_uses_anchor_weighted_votes() -> None:
                 "latitude": "",
                 "longitude": "",
                 "customer_ids": "u3",
-                "hourly_profile": "|".join("0" for _ in range(24)),
             },
         ]
     )
@@ -83,7 +80,6 @@ def test_graph_score_uses_anchor_weighted_votes() -> None:
                 "centroid_latitude": "",
                 "centroid_longitude": "",
                 "sigma_meters": 100.0,
-                "hourly_profile": "|".join("0" for _ in range(24)),
             },
             {
                 "city_code": "shanghai",
@@ -95,7 +91,6 @@ def test_graph_score_uses_anchor_weighted_votes() -> None:
                 "centroid_latitude": "",
                 "centroid_longitude": "",
                 "sigma_meters": 100.0,
-                "hourly_profile": "|".join("0" for _ in range(24)),
             },
         ]
     )
@@ -145,7 +140,6 @@ def test_geo_graph_conflict_goes_to_manual_review() -> None:
                 "latitude": 31.0,
                 "longitude": 121.0,
                 "customer_ids": "u1",
-                "hourly_profile": "|".join("0" for _ in range(24)),
             },
             {
                 "city_code": "shanghai",
@@ -157,7 +151,6 @@ def test_geo_graph_conflict_goes_to_manual_review() -> None:
                 "latitude": 31.2,
                 "longitude": 121.2,
                 "customer_ids": "u2",
-                "hourly_profile": "|".join("0" for _ in range(24)),
             },
         ]
     )
@@ -173,7 +166,6 @@ def test_geo_graph_conflict_goes_to_manual_review() -> None:
                 "centroid_latitude": 31.0,
                 "centroid_longitude": 121.0,
                 "sigma_meters": 100.0,
-                "hourly_profile": "|".join("0" for _ in range(24)),
             },
             {
                 "city_code": "shanghai",
@@ -185,7 +177,6 @@ def test_geo_graph_conflict_goes_to_manual_review() -> None:
                 "centroid_latitude": 31.2,
                 "centroid_longitude": 121.2,
                 "sigma_meters": 100.0,
-                "hourly_profile": "|".join("0" for _ in range(24)),
             },
         ]
     )

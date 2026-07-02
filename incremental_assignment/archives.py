@@ -20,7 +20,6 @@ MERCHANT_ARCHIVE_COLUMNS = [
     "latitude",
     "longitude",
     "customer_ids",
-    "hourly_profile",
 ]
 COMMUNITY_ARCHIVE_COLUMNS = [
     "city_code",
@@ -32,7 +31,6 @@ COMMUNITY_ARCHIVE_COLUMNS = [
     "centroid_latitude",
     "centroid_longitude",
     "sigma_meters",
-    "hourly_profile",
 ]
 
 
@@ -44,21 +42,6 @@ def _parse_pipe_set(value: object) -> set[str]:
     if pd.isna(value):
         return set()
     return {item.strip() for item in str(value).split("|") if item.strip()}
-
-
-def _parse_hourly_profile(value: object) -> tuple[int, ...]:
-    if pd.isna(value) or not str(value).strip():
-        return tuple(0 for _ in range(24))
-    parts = [item.strip() for item in str(value).split("|")]
-    if len(parts) != 24:
-        raise TransactionDataError(f"档案 hourly_profile 必须包含 24 个数值: value={value}")
-    return tuple(int(item) for item in parts)
-
-
-def _format_hourly_profile(values: tuple[int, ...]) -> str:
-    if len(values) != 24:
-        raise TransactionDataError(f"小时画像必须包含 24 个数值: length={len(values)}")
-    return "|".join(str(value) for value in values)
 
 
 def _haversine_meters(
@@ -122,7 +105,6 @@ def build_initial_merchant_archive(
             "latitude": enriched["latitude"],
             "longitude": enriched["longitude"],
             "customer_ids": "",
-            "hourly_profile": _format_hourly_profile(tuple(0 for _ in range(24))),
         }
     )
     return result[MERCHANT_ARCHIVE_COLUMNS]
@@ -146,11 +128,8 @@ def build_community_archive(
     active = merchants.loc[merchants["community_id"].astype(int) >= 0]
     for (city_code, community_id), group in active.groupby(["city_code", "community_id"], sort=True):
         customer_ids: set[str] = set()
-        hourly = [0 for _ in range(24)]
         for row in group.to_dict("records"):
             customer_ids.update(_parse_pipe_set(row["customer_ids"]))
-            profile = _parse_hourly_profile(row["hourly_profile"])
-            hourly = [left + right for left, right in zip(hourly, profile)]
 
         coordinates = [
             (float(row["latitude"]), float(row["longitude"]))
@@ -195,7 +174,6 @@ def build_community_archive(
                 "centroid_latitude": centroid_latitude,
                 "centroid_longitude": centroid_longitude,
                 "sigma_meters": sigma_meters,
-                "hourly_profile": _format_hourly_profile(tuple(hourly)),
             }
         )
     return pd.DataFrame(rows, columns=COMMUNITY_ARCHIVE_COLUMNS)
@@ -208,7 +186,7 @@ def apply_assignments(
 ) -> pd.DataFrame:
     assigned = [decision for decision in decisions if decision.decision == "assigned"]
     if not assigned:
-        return merchants.copy()
+        return merchants[MERCHANT_ARCHIVE_COLUMNS].copy()
     existing_keys = {
         (str(row["city_code"]), str(row["merchant_id"]))
         for row in merchants.to_dict("records")
@@ -232,7 +210,6 @@ def apply_assignments(
                 "latitude": "" if candidate.latitude is None else candidate.latitude,
                 "longitude": "" if candidate.longitude is None else candidate.longitude,
                 "customer_ids": _to_pipe(list(candidate.customer_ids)),
-                "hourly_profile": _format_hourly_profile(candidate.hourly_profile),
             }
         )
     updated = pd.concat([merchants, pd.DataFrame(rows)], ignore_index=True)
@@ -250,4 +227,3 @@ def write_archives(
     write_csv(community_archive, community_archive_path)
     write_csv(merchant_archive, run_directory / "merchant_archive.csv")
     write_csv(community_archive, run_directory / "community_archive.csv")
-

@@ -49,7 +49,6 @@ class CandidateMerchant:
     customer_ids: frozenset[str]
     latitude: float | None
     longitude: float | None
-    hourly_profile: tuple[int, ...]
 
 
 @dataclass(frozen=True)

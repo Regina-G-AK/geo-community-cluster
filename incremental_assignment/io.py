@@ -135,17 +135,6 @@ def _parse_customer_ids(value: str, merchant_id: str) -> frozenset[str]:
     return ids
 
 
-def _parse_hourly_profile(value: object, merchant_id: str) -> tuple[int, ...]:
-    if pd.isna(value) or not str(value).strip():
-        return tuple(0 for _ in range(24))
-    parts = [item.strip() for item in str(value).split("|")]
-    if len(parts) != 24:
-        raise TransactionDataError(
-            f"候选商户 hourly_profile 必须包含 24 个数值: merchant_id={merchant_id}"
-        )
-    return tuple(_parse_int(item, "hourly_profile", merchant_id) for item in parts)
-
-
 def load_candidates(path: Path) -> list[CandidateMerchant]:
     data = read_csv_checked(path, CANDIDATE_COLUMNS, "待判定商户表")
     candidates: list[CandidateMerchant] = []
@@ -181,7 +170,6 @@ def load_candidates(path: Path) -> list[CandidateMerchant]:
                 customer_ids=_parse_customer_ids(str(row["customer_ids"]), merchant_id),
                 latitude=_parse_optional_float(row.get("latitude"), "latitude", merchant_id),
                 longitude=_parse_optional_float(row.get("longitude"), "longitude", merchant_id),
-                hourly_profile=_parse_hourly_profile(row.get("hourly_profile"), merchant_id),
             )
         )
     return candidates
@@ -206,4 +194,3 @@ def read_optional_coordinates(path: Path | None) -> pd.DataFrame:
     if path is None:
         return pd.DataFrame(columns=sorted(COORDINATE_COLUMNS))
     return read_csv_checked(path, COORDINATE_COLUMNS, "商户坐标表")
-
