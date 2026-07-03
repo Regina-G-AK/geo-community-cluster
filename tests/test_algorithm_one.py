@@ -1,6 +1,6 @@
 import math
+import pickle
 import re
-import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -24,7 +24,14 @@ from business_district.graph import (
 )
 from business_district.pipeline import run_algorithm_one
 from business_district.results import build_business_results, build_merchant_results
-from business_district.transactions import CARD, MERCHANT, TIMESTAMP, load_transactions
+from business_district.transactions import (
+    CARD,
+    DT,
+    MERCHANT,
+    TIMESTAMP,
+    load_hive_transactions,
+    load_transactions,
+)
 
 
 def _transaction_row(
@@ -138,6 +145,86 @@ path = "{(tmp_path / 'experiments.md').as_posix()}"
 
     with pytest.raises(TransactionDataError, match="重复流水号"):
         load_transactions(load_config(config_path).input)
+
+
+def test_load_hive_transactions_fills_partition_dt() -> None:
+    source = pd.DataFrame(
+        [
+            {
+                "account_number": "u1",
+                "global_flow_number": "f1",
+                "storename": "a",
+                "transaction_time": "20260101T100000",
+                "pos_longitude": "",
+                "pos_latitude": "",
+                "region": "shanghai",
+                "is_interfere": "",
+                "is_abnormal": "",
+            }
+        ]
+    )
+
+    transactions = load_hive_transactions(
+        source,
+        ("%Y%m%dT%H%M%S",),
+        "20260101",
+        "source_table",
+    )
+
+    assert transactions[DT].tolist() == ["20260101"]
+
+
+def test_load_hive_transactions_keeps_first_duplicate_flow_day() -> None:
+    source = pd.DataFrame(
+        [
+            {
+                "account_number": "u1",
+                "global_flow_number": "f1",
+                "storename": "late",
+                "transaction_time": "20260102T100000",
+                "pos_longitude": "",
+                "pos_latitude": "",
+                "region": "shanghai",
+                "is_interfere": "",
+                "is_abnormal": "",
+                "dt": "20260102",
+            },
+            {
+                "account_number": "u1",
+                "global_flow_number": "f1",
+                "storename": "early",
+                "transaction_time": "20260101T100000",
+                "pos_longitude": "",
+                "pos_latitude": "",
+                "region": "shanghai",
+                "is_interfere": "",
+                "is_abnormal": "",
+                "dt": "20260101",
+            },
+            {
+                "account_number": "u2",
+                "global_flow_number": "f2",
+                "storename": "normal",
+                "transaction_time": "20260102T110000",
+                "pos_longitude": "",
+                "pos_latitude": "",
+                "region": "shanghai",
+                "is_interfere": "",
+                "is_abnormal": "",
+                "dt": "20260102",
+            },
+        ]
+    )
+
+    transactions = load_hive_transactions(
+        source,
+        ("%Y%m%dT%H%M%S",),
+        "20260102",
+        "source_table",
+    )
+
+    assert transactions[MERCHANT].tolist() == ["early", "normal"]
+    assert transactions[DT].tolist() == ["20260101", "20260102"]
 
 
 def test_cds_pmi_matches_base_pmi_when_alpha_is_one() -> None:
@@ -500,7 +587,7 @@ path = "{(tmp_path / 'experiments.md').as_posix()}"
     assert re.fullmatch(r"transaction_count_leiden_\d{12}", run_directory.name)
     assert sorted(path.name for path in run_directory.iterdir()) == [
         "business_district.csv",
-        "pair_statistics.sqlite3",
+        "pair_statistics.pkl",
     ]
     assert summary.merchant_count == 4
     assert summary.community_count == 1
@@ -542,14 +629,10 @@ path = "{(tmp_path / 'experiments.md').as_posix()}"
     assert merchant_a["community_share"] == 1.0
     assert merchant_a["chain_visit_count_threshold"] == 100
 
-    connection = sqlite3.connect(str(run_directory / "pair_statistics.sqlite3"))
-    try:
-        pair_count = connection.execute("SELECT COUNT(*) FROM merchant_pairs").fetchone()[0]
-        visit_count = connection.execute("SELECT COUNT(*) FROM merchant_visits").fetchone()[0]
-    finally:
-        connection.close()
-    assert pair_count == 3
-    assert visit_count == 4
+    with (run_directory / "pair_statistics.pkl").open("rb") as file:
+        pair_statistics = pickle.load(file)
+    assert len(pair_statistics.strengths) == 3
+    assert len(pair_statistics.merchant_visit_counts) == 4
 
     experiment_text = (tmp_path / "experiments.md").read_text(encoding="utf-8")
     assert "原始交易" in experiment_text

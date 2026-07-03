@@ -71,7 +71,7 @@ def run_algorithm_one_from_transactions(
     )
     write_pair_statistics(
         statistics,
-        output_directory / "pair_statistics.sqlite3",
+        output_directory / "pair_statistics.pkl",
     )
     graph = build_sparse_graph(
         statistics,

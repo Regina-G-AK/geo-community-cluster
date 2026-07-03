@@ -29,6 +29,7 @@ from business_district.transactions import (
     RAW_TIMESTAMP,
     REGION,
     TIMESTAMP,
+    keep_first_hive_flow_number_rows,
     merge_visits,
 )
 from incremental_assignment.config import load_config as load_assignment_config
@@ -238,15 +239,7 @@ def load_incremental_transactions(
             "Hive 输入表包含空卡号、流水号、商户名、地区或日期: "
             f"table={source_table}, invalid_rows={int(invalid.sum())}, examples={examples}"
         )
-    duplicate_flow_numbers = selected.loc[
-        selected[FLOW_NUMBER].duplicated(keep=False),
-        FLOW_NUMBER,
-    ].head(10).tolist()
-    if duplicate_flow_numbers:
-        raise TransactionDataError(
-            "Hive 输入表包含重复流水号: "
-            f"table={source_table}, examples={duplicate_flow_numbers}"
-        )
+    selected = keep_first_hive_flow_number_rows(selected)
     selected[TIMESTAMP] = _parse_transaction_time(
         selected[RAW_TIMESTAMP],
         timestamp_formats,

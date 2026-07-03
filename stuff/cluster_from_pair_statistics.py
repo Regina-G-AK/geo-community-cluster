@@ -4,8 +4,8 @@ import argparse
 import configparser
 import json
 import math
+import pickle
 import re
-import sqlite3
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -24,7 +24,7 @@ EdgeCandidate = Tuple[float, Optional[float], int]
 PreparedEdgeCandidate = Tuple[float, float, Optional[float], int, float]
 MERCHANT_ID = "merchant_id"
 DEFAULT_CONFIG_PATH = Path("configs/shanghai.toml")
-DEFAULT_PAIRS_PATH = Path("data/shanghai/pair_statistics.sqlite3")
+DEFAULT_PAIRS_PATH = Path("data/shanghai/pair_statistics.pkl")
 DEFAULT_OUTPUT_PATH = Path("pmi_output/shanghai")
 
 
@@ -498,46 +498,67 @@ def load_pair_statistics(path: Path) -> PairStatistics:
     if not path.is_file():
         raise PairStatisticsDataError(f"商户对中间文件不存在: path={path}")
 
-    connection = sqlite3.connect(str(path))
     try:
-        pair_rows = connection.execute(
-            "SELECT merchant_a, merchant_b, strength, support FROM merchant_pairs"
-        ).fetchall()
-        visit_rows = connection.execute(
-            "SELECT merchant_id, visit_count FROM merchant_visits"
-        ).fetchall()
-    except sqlite3.DatabaseError as error:
+        with path.open("rb") as file:
+            loaded = pickle.load(file)
+    except (OSError, pickle.PickleError, AttributeError, ImportError, EOFError) as error:
         raise PairStatisticsDataError(
             f"商户对中间文件格式错误: path={path}, reason={error}"
         ) from error
-    finally:
-        connection.close()
 
-    strengths: dict[MerchantPair, float] = {}
-    supports: dict[MerchantPair, int] = {}
-    for merchant_a, merchant_b, strength, support in pair_rows:
+    loaded_strengths = getattr(loaded, "strengths", None)
+    loaded_supports = getattr(loaded, "supports", None)
+    loaded_visit_counts = getattr(loaded, "merchant_visit_counts", None)
+    if not isinstance(loaded_strengths, dict):
+        raise PairStatisticsDataError(
+            f"商户对中间文件格式错误: path={path}, missing=strengths"
+        )
+    if not isinstance(loaded_supports, dict):
+        raise PairStatisticsDataError(
+            f"商户对中间文件格式错误: path={path}, missing=supports"
+        )
+    if not isinstance(loaded_visit_counts, dict):
+        raise PairStatisticsDataError(
+            f"商户对中间文件格式错误: path={path}, missing=merchant_visit_counts"
+        )
+
+    loaded_pair_strengths: dict[MerchantPair, float] = {}
+    loaded_pair_supports: dict[MerchantPair, int] = {}
+    for pair_key, strength in loaded_strengths.items():
+        if not isinstance(pair_key, tuple) or len(pair_key) != 2:
+            raise PairStatisticsDataError(
+                f"商户对中间文件包含无效商户对: path={path}, pair={pair_key!r}"
+            )
+        merchant_a, merchant_b = pair_key
         left = str(merchant_a)
         right = str(merchant_b)
+        pair = (left, right)
+        if pair_key in loaded_supports:
+            support = loaded_supports[pair_key]
+        elif pair in loaded_supports:
+            support = loaded_supports[pair]
+        else:
+            raise PairStatisticsDataError(
+                f"商户对中间文件缺少 support: path={path}, merchant_a={left!r}, merchant_b={right!r}"
+            )
         pair_strength = float(strength)
         pair_support = int(support)
         _validate_pair_row(left, right, pair_strength, pair_support, path)
-        pair = (left, right)
-        strengths[pair] = pair_strength
-        supports[pair] = pair_support
+        loaded_pair_strengths[pair] = pair_strength
+        loaded_pair_supports[pair] = pair_support
 
-    merchant_visit_counts: dict[str, int] = {}
-    for merchant_id, visit_count in visit_rows:
+    loaded_merchant_visit_counts: dict[str, int] = {}
+    for merchant_id, visit_count in loaded_visit_counts.items():
         merchant_key = str(merchant_id)
         merchant_count = int(visit_count)
         _validate_visit_row(merchant_key, merchant_count, path)
-        merchant_visit_counts[merchant_key] = merchant_count
+        loaded_merchant_visit_counts[merchant_key] = merchant_count
 
     return PairStatistics(
-        strengths=strengths,
-        supports=supports,
-        merchant_visit_counts=merchant_visit_counts,
+        strengths=loaded_pair_strengths,
+        supports=loaded_pair_supports,
+        merchant_visit_counts=loaded_merchant_visit_counts,
     )
-
 
 def _calculate_sppmi_candidates(
     statistics: PairStatistics,
@@ -1764,7 +1785,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pairs",
         default=str(DEFAULT_PAIRS_PATH),
-        help=f"已生成的商户对 SQLite 中间文件，默认 {DEFAULT_PAIRS_PATH}",
+        help=f"已生成的商户对 pkl 中间文件，默认 {DEFAULT_PAIRS_PATH}",
     )
     parser.add_argument(
         "--output",

@@ -141,3 +141,47 @@ def test_insert_new_target_rows_uses_insert_into(
     assert "insert into table target_table" in joined_sql
     assert "insert overwrite" not in joined_sql
     assert "left join target_table target" in joined_sql
+
+
+def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    source = pd.DataFrame(
+        [
+            {
+                "account_number": "u1",
+                "global_flow_number": "f1",
+                "storename": "late",
+                "transaction_time": "20260102T100000",
+                "region": "shanghai",
+                "dt": "20260102",
+            },
+            {
+                "account_number": "u1",
+                "global_flow_number": "f1",
+                "storename": "early",
+                "transaction_time": "20260101T100000",
+                "region": "shanghai",
+                "dt": "20260101",
+            },
+            {
+                "account_number": "u2",
+                "global_flow_number": "f2",
+                "storename": "normal",
+                "transaction_time": "20260102T110000",
+                "region": "shanghai",
+                "dt": "20260102",
+            },
+        ]
+    )
+
+    transactions = hive_task.load_incremental_transactions(
+        source,
+        ("%Y%m%dT%H%M%S",),
+        "source_table",
+    )
+
+    assert transactions[hive_task.MERCHANT].tolist() == ["early", "normal"]
+    assert transactions[hive_task.DT].tolist() == ["20260101", "20260102"]

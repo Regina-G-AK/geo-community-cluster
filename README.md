@@ -117,10 +117,10 @@ business_district.csv
 同一运行目录还会写入商户对中间文件：
 
 ```text
-pair_statistics.sqlite3
+pair_statistics.pkl
 ```
 
-该文件包含 `merchant_pairs` 和 `merchant_visits` 两张表，用于复用商户对统计结果重新执行后续聚类实验。文件与业务 CSV 都保留在本地运行目录，不在当前包内写入 Hive。
+该文件是 pickle 格式的 `PairStatistics` 对象，包含 `strengths`、`supports` 和 `merchant_visit_counts`，用于复用商户对统计结果重新执行后续聚类实验。文件与业务 CSV 都保留在本地运行目录，不在当前包内写入 Hive。
 
 Hive 入口输入表必须包含：
 

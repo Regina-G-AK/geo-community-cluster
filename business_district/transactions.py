@@ -59,6 +59,11 @@ def _parse_timestamps(values: pd.Series, formats: tuple[str, ...]) -> pd.Series:
     return parsed
 
 
+def keep_first_hive_flow_number_rows(selected: pd.DataFrame) -> pd.DataFrame:
+    ordered = selected.sort_values([FLOW_NUMBER, DT, RAW_TIMESTAMP], kind="stable")
+    return ordered.drop_duplicates(subset=[FLOW_NUMBER], keep="first").copy()
+
+
 def load_transactions(config: InputConfig) -> pd.DataFrame:
     path: Path = config.transactions_path
     if not path.exists():
@@ -156,6 +161,8 @@ def load_hive_transactions(
 ) -> pd.DataFrame:
     source = dataframe.copy()
     source.columns = source.columns.astype("string").str.strip()
+    if DT not in source.columns:
+        source[DT] = dt_value
     missing_columns = sorted(HIVE_REQUIRED_COLUMNS.difference(set(source.columns)))
     if missing_columns:
         raise TransactionDataError(
@@ -192,15 +199,7 @@ def load_hive_transactions(
             f"table={source_name}, invalid_rows={int(invalid_identifier.sum())}, examples={examples}"
         )
 
-    duplicate_flow_numbers = selected.loc[
-        selected[FLOW_NUMBER].duplicated(keep=False),
-        FLOW_NUMBER,
-    ].head(10).tolist()
-    if duplicate_flow_numbers:
-        raise TransactionDataError(
-            "Hive 输入表包含重复流水号: "
-            f"table={source_name}, examples={duplicate_flow_numbers}"
-        )
+    selected = keep_first_hive_flow_number_rows(selected)
 
     parsed_timestamps = _parse_timestamps(
         selected[RAW_TIMESTAMP],
