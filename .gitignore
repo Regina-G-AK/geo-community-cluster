@@ -221,3 +221,4 @@ data.txt
 *.zip
 receipt/
 .obsidian/
+*.xlsx
