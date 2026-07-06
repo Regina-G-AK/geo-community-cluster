@@ -9,13 +9,18 @@ from business_district.errors import TransactionDataError
 
 CARD = "card_id"
 MERCHANT = "merchant_id"
+SOURCE_MERCHANT = "source_merchant_id"
 TIMESTAMP = "timestamp"
 FLOW_NUMBER = "global_flow_number"
 REGION = "region"
 DT = "dt"
+LONGITUDE = "longitude"
+LATITUDE = "latitude"
 RAW_CARD = "account_number"
 RAW_MERCHANT = "storename"
 RAW_TIMESTAMP = "transaction_time"
+RAW_LONGITUDE = "pos_longitude"
+RAW_LATITUDE = "pos_latitude"
 RAW_INTERFERE = "is_interfere"
 RAW_ABNORMAL = "is_abnormal"
 REQUIRED_COLUMNS = {
@@ -23,8 +28,8 @@ REQUIRED_COLUMNS = {
     FLOW_NUMBER,
     RAW_MERCHANT,
     RAW_TIMESTAMP,
-    "pos_longitude",
-    "pos_latitude",
+    RAW_LONGITUDE,
+    RAW_LATITUDE,
     REGION,
     "is_intefere",
     "status",
@@ -35,8 +40,8 @@ HIVE_REQUIRED_COLUMNS = {
     FLOW_NUMBER,
     RAW_MERCHANT,
     RAW_TIMESTAMP,
-    "pos_longitude",
-    "pos_latitude",
+    RAW_LONGITUDE,
+    RAW_LATITUDE,
     REGION,
     RAW_INTERFERE,
     RAW_ABNORMAL,
@@ -62,6 +67,37 @@ def _parse_timestamps(values: pd.Series, formats: tuple[str, ...]) -> pd.Series:
 def keep_first_hive_flow_number_rows(selected: pd.DataFrame) -> pd.DataFrame:
     ordered = selected.sort_values([FLOW_NUMBER, DT, RAW_TIMESTAMP], kind="stable")
     return ordered.drop_duplicates(subset=[FLOW_NUMBER], keep="first").copy()
+
+
+def _parse_coordinates(selected: pd.DataFrame) -> pd.DataFrame:
+    longitude_text = selected[RAW_LONGITUDE].astype("string").str.strip()
+    latitude_text = selected[RAW_LATITUDE].astype("string").str.strip()
+    longitude_empty = longitude_text.isna() | longitude_text.eq("")
+    latitude_empty = latitude_text.isna() | latitude_text.eq("")
+    partial_coordinate = longitude_empty != latitude_empty
+    complete_coordinate = (~longitude_empty) & (~latitude_empty)
+    longitude = pd.to_numeric(
+        longitude_text.mask(~complete_coordinate),
+        errors="coerce",
+    )
+    latitude = pd.to_numeric(
+        latitude_text.mask(~complete_coordinate),
+        errors="coerce",
+    )
+    valid_number = complete_coordinate & longitude.notna() & latitude.notna()
+    valid_range = (
+        valid_number
+        & longitude.ge(-180.0)
+        & longitude.le(180.0)
+        & latitude.ge(-90.0)
+        & latitude.le(90.0)
+    )
+    valid_coordinate = (~partial_coordinate) & valid_range
+
+    result = selected.copy()
+    result[LONGITUDE] = longitude.where(valid_coordinate).astype("Float64")
+    result[LATITUDE] = latitude.where(valid_coordinate).astype("Float64")
+    return result
 
 
 def load_transactions(config: InputConfig) -> pd.DataFrame:
@@ -92,11 +128,22 @@ def load_transactions(config: InputConfig) -> pd.DataFrame:
         )
 
     selected = source[
-        [RAW_CARD, FLOW_NUMBER, RAW_MERCHANT, RAW_TIMESTAMP, REGION, DT]
+        [
+            RAW_CARD,
+            FLOW_NUMBER,
+            RAW_MERCHANT,
+            RAW_TIMESTAMP,
+            RAW_LONGITUDE,
+            RAW_LATITUDE,
+            REGION,
+            DT,
+        ]
     ].copy()
     selected[RAW_CARD] = selected[RAW_CARD].str.strip()
     selected[FLOW_NUMBER] = selected[FLOW_NUMBER].str.strip()
     selected[RAW_MERCHANT] = selected[RAW_MERCHANT].str.strip()
+    selected[RAW_LONGITUDE] = selected[RAW_LONGITUDE].str.strip()
+    selected[RAW_LATITUDE] = selected[RAW_LATITUDE].str.strip()
     selected[REGION] = selected[REGION].str.strip()
     selected[DT] = selected[DT].str.strip()
 
@@ -118,6 +165,8 @@ def load_transactions(config: InputConfig) -> pd.DataFrame:
             "交易文件包含空卡号、流水号、店名、地区或日期: "
             f"path={path}, invalid_rows={int(invalid_identifier.sum())}, examples={examples}"
         )
+
+    selected = _parse_coordinates(selected)
 
     duplicate_flow_numbers = selected.loc[
         selected[FLOW_NUMBER].duplicated(keep=False),
@@ -149,6 +198,7 @@ def load_transactions(config: InputConfig) -> pd.DataFrame:
             RAW_TIMESTAMP: TIMESTAMP,
         }
     )
+    result[SOURCE_MERCHANT] = result[MERCHANT]
     result[TIMESTAMP] = parsed_timestamps
     return result.sort_values([CARD, TIMESTAMP, MERCHANT]).reset_index(drop=True)
 
@@ -171,12 +221,23 @@ def load_hive_transactions(
         )
 
     selected = source[
-        [RAW_CARD, FLOW_NUMBER, RAW_MERCHANT, RAW_TIMESTAMP, REGION, DT]
+        [
+            RAW_CARD,
+            FLOW_NUMBER,
+            RAW_MERCHANT,
+            RAW_TIMESTAMP,
+            RAW_LONGITUDE,
+            RAW_LATITUDE,
+            REGION,
+            DT,
+        ]
     ].copy()
     selected[RAW_CARD] = selected[RAW_CARD].astype("string").str.strip()
     selected[FLOW_NUMBER] = selected[FLOW_NUMBER].astype("string").str.strip()
     selected[RAW_MERCHANT] = selected[RAW_MERCHANT].astype("string").str.strip()
     selected[RAW_TIMESTAMP] = selected[RAW_TIMESTAMP].astype("string").str.strip()
+    selected[RAW_LONGITUDE] = selected[RAW_LONGITUDE].astype("string").str.strip()
+    selected[RAW_LATITUDE] = selected[RAW_LATITUDE].astype("string").str.strip()
     selected[REGION] = selected[REGION].astype("string").str.strip()
     selected[DT] = selected[DT].astype("string").str.strip()
 
@@ -199,6 +260,7 @@ def load_hive_transactions(
             f"table={source_name}, invalid_rows={int(invalid_identifier.sum())}, examples={examples}"
         )
 
+    selected = _parse_coordinates(selected)
     selected = keep_first_hive_flow_number_rows(selected)
 
     parsed_timestamps = _parse_timestamps(
@@ -221,6 +283,7 @@ def load_hive_transactions(
             RAW_TIMESTAMP: TIMESTAMP,
         }
     )
+    result[SOURCE_MERCHANT] = result[MERCHANT]
     result[TIMESTAMP] = parsed_timestamps
     return result.sort_values([CARD, TIMESTAMP, MERCHANT]).reset_index(drop=True)
 
@@ -229,6 +292,9 @@ def build_merchant_metadata(transactions: pd.DataFrame) -> pd.DataFrame:
     ordered = transactions.sort_values([MERCHANT, TIMESTAMP, REGION, DT])
     latest_timestamp = ordered.groupby(MERCHANT, sort=True)[TIMESTAMP].transform("max")
     latest_rows = ordered.loc[ordered[TIMESTAMP].eq(latest_timestamp)]
+    metadata_columns = [MERCHANT, REGION, DT]
+    if SOURCE_MERCHANT in latest_rows.columns:
+        metadata_columns.append(SOURCE_MERCHANT)
     conflicts = (
         latest_rows.groupby(MERCHANT, sort=True)[[REGION, DT]]
         .nunique()
@@ -241,9 +307,7 @@ def build_merchant_metadata(transactions: pd.DataFrame) -> pd.DataFrame:
             f"merchants={conflicted_merchants[:10]}"
         )
     return (
-        latest_rows.drop_duplicates(subset=[MERCHANT], keep="last")[
-            [MERCHANT, REGION, DT]
-        ]
+        latest_rows.drop_duplicates(subset=[MERCHANT], keep="last")[metadata_columns]
         .copy()
         .reset_index(drop=True)
     )

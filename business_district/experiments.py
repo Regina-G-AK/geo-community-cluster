@@ -11,6 +11,7 @@ import pandas as pd
 
 from business_district.community import CleaningResult
 from business_district.config import AppConfig
+from business_district.geo import GeographicSummary
 from business_district.graph import PairStatistics, calculate_edge_candidates
 
 
@@ -44,10 +45,12 @@ def _format_optional_count(value: int | None) -> str:
 def build_experiment_record(
     config: AppConfig,
     statistics: PairStatistics,
+    transaction_graph: nx.Graph,
     graph: nx.Graph,
     cleaning: CleaningResult,
     merchants: pd.DataFrame,
     communities: pd.DataFrame,
+    geographic_summary: GeographicSummary,
     context: ExperimentContext,
     experiment_number: int,
 ) -> str:
@@ -66,6 +69,11 @@ def build_experiment_record(
         config.graph,
     )
     candidate_merchants = _pair_merchants(set(candidates))
+    transaction_connected_merchants = {
+        str(node)
+        for node in transaction_graph
+        if transaction_graph.degree(node) > 0
+    }
     connected_merchants = {
         str(node)
         for node in graph
@@ -125,7 +133,9 @@ def build_experiment_record(
     losses: dict[str, int] = {
         "未形成时间窗商户对": total_merchants - len(raw_pair_merchants),
         "最小支持人数过滤": len(raw_pair_merchants) - len(supported_merchants),
-        "互为top-k过滤": len(candidate_merchants) - len(connected_merchants),
+        "互为top-k过滤": (
+            len(candidate_merchants) - len(transaction_connected_merchants)
+        ),
         "迭代hub清洗": len(connected_merchants) - len(cleaned_connected_merchants),
         "有效社区规模过滤": len(cleaned_connected_merchants) - valid_merchant_count,
     }
@@ -185,6 +195,7 @@ def build_experiment_record(
     ANCHOR_MAX_PARTICIPATION = {config.anchors.maximum_participation}
     CHAIN_VISIT_COUNT_QUANTILE = {config.anchors.chain_visit_count_quantile}
     CHAIN_MINIMUM_VISIT_COUNT = {config.anchors.chain_minimum_visit_count}
+    GEO_CLUSTER_RADIUS_METERS = {config.geo.cluster_radius_meters}
     OUTPUT_ROOT = {str(config.output.directory)!r}
     EXPERIMENT_PATH = {str(config.experiments.path)!r}
     ```
@@ -193,13 +204,15 @@ def build_experiment_record(
         - 原始商户对：{len(raw_pairs)}对，覆盖商户{len(raw_pair_merchants)}个
         - 支持人数>={config.cooccurrence.minimum_unique_users}：{len(supported_pairs)}对，覆盖商户{len(supported_merchants)}个
         - {candidate_stage}：{len(candidates)}对，覆盖商户{len(candidate_merchants)}个
-        - 通过互为top-k：{graph.number_of_edges()}条边，覆盖商户{len(connected_merchants)}个
+        - 通过互为top-k：{transaction_graph.number_of_edges()}条边，覆盖商户{len(transaction_connected_merchants)}个
+        - 地理种子合并后：{graph.number_of_edges()}条边，覆盖商户{len(connected_merchants)}个
         - 迭代hub清洗后：{cleaning.graph.number_of_edges()}条边，覆盖商户{len(cleaned_connected_merchants)}个
     - 聚类结果：
         - 全部社区：{len(community_sizes)}个，孤立商户{int((community_sizes == 1).sum())}个
         - 有效社区：{valid_community_count}个（商户数>={minimum_community_size}）
         - 较大社区：{large_community_count}个（商户数>=10）
         - 有效社区商户：{valid_merchant_count}个，占全部商户{coverage:.2%}
+        - 地理种子：坐标交易行{geographic_summary.positioned_transaction_count}行，坐标商户{geographic_summary.positioned_merchant_count}个，拆分门店实体{geographic_summary.split_entity_count}个，种子簇{geographic_summary.seed_cluster_count}个，种子边{geographic_summary.seed_edge_count}条
         - 候选锚点：{int(merchants['is_anchor_candidate'].sum())}个，单社区最多{maximum_anchor_count}个
         - 无效社区锚点：{invalid_anchor_count}个
         - 连锁/泛客群商户：{chain_like_merchant_count}个，其中访问量规则命中{visit_count_chain_like_merchant_count}个
@@ -216,10 +229,12 @@ def append_experiment_record(
     path: Path,
     config: AppConfig,
     statistics: PairStatistics,
+    transaction_graph: nx.Graph,
     graph: nx.Graph,
     cleaning: CleaningResult,
     merchants: pd.DataFrame,
     communities: pd.DataFrame,
+    geographic_summary: GeographicSummary,
     context: ExperimentContext,
 ) -> None:
     if path.exists():
@@ -232,10 +247,12 @@ def append_experiment_record(
     record = build_experiment_record(
         config,
         statistics,
+        transaction_graph,
         graph,
         cleaning,
         merchants,
         communities,
+        geographic_summary,
         context,
         _next_experiment_number(content),
     )

@@ -93,6 +93,9 @@ maximum_cleaning_rounds = 2
 minimum_hub_degree = 10
 participation_threshold = 0.9
 
+[geo]
+cluster_radius_meters = 1000.0
+
 [anchors]
 minimum_count = 1
 maximum_count = 2

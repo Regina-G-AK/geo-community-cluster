@@ -16,6 +16,7 @@ from business_district.config import (
     load_config,
 )
 from business_district.errors import TransactionDataError
+from business_district.geo import prepare_geographic_transactions
 from business_district.graph import (
     PairStatistics,
     _calculate_sppmi_candidates,
@@ -27,7 +28,11 @@ from business_district.results import build_business_results, build_merchant_res
 from business_district.transactions import (
     CARD,
     DT,
+    LATITUDE,
+    LONGITUDE,
     MERCHANT,
+    REGION,
+    SOURCE_MERCHANT,
     TIMESTAMP,
     load_hive_transactions,
     load_transactions,
@@ -45,6 +50,22 @@ def _transaction_row(
     return (
         f"{account_number}|{flow_number}|{storename}|{transaction_time}"
         f"|||{region}|||{dt}"
+    )
+
+
+def _transaction_row_with_coordinates(
+    account_number: str,
+    flow_number: str,
+    storename: str,
+    transaction_time: str,
+    longitude: str,
+    latitude: str,
+    region: str,
+    dt: str,
+) -> str:
+    return (
+        f"{account_number}|{flow_number}|{storename}|{transaction_time}|"
+        f"{longitude}|{latitude}|{region}|||{dt}"
     )
 
 
@@ -124,6 +145,9 @@ random_seed = 42
 maximum_cleaning_rounds = 2
 minimum_hub_degree = 10
 participation_threshold = 0.9
+
+[geo]
+cluster_radius_meters = 1000.0
 
 [anchors]
 minimum_count = 1
@@ -225,6 +249,118 @@ def test_load_hive_transactions_keeps_first_duplicate_flow_day() -> None:
 
     assert transactions[MERCHANT].tolist() == ["early", "normal"]
     assert transactions[DT].tolist() == ["20260101", "20260102"]
+
+
+def test_load_hive_transactions_treats_invalid_coordinates_as_missing() -> None:
+    source = pd.DataFrame(
+        [
+            {
+                "account_number": "u1",
+                "global_flow_number": "f1",
+                "storename": "partial",
+                "transaction_time": "20260101T100000",
+                "pos_longitude": "121.0",
+                "pos_latitude": "",
+                "region": "shanghai",
+                "is_interfere": "",
+                "is_abnormal": "",
+                "dt": "20260101",
+            },
+            {
+                "account_number": "u2",
+                "global_flow_number": "f2",
+                "storename": "bad-number",
+                "transaction_time": "20260101T101000",
+                "pos_longitude": "bad",
+                "pos_latitude": "31.0",
+                "region": "shanghai",
+                "is_interfere": "",
+                "is_abnormal": "",
+                "dt": "20260101",
+            },
+            {
+                "account_number": "u3",
+                "global_flow_number": "f3",
+                "storename": "out-of-range",
+                "transaction_time": "20260101T102000",
+                "pos_longitude": "181.0",
+                "pos_latitude": "31.0",
+                "region": "shanghai",
+                "is_interfere": "",
+                "is_abnormal": "",
+                "dt": "20260101",
+            },
+        ]
+    )
+
+    transactions = load_hive_transactions(
+        source,
+        ("%Y%m%dT%H%M%S",),
+        "20260101",
+        "source_table",
+    )
+
+    assert transactions[LONGITUDE].isna().all()
+    assert transactions[LATITUDE].isna().all()
+
+
+def test_geographic_preparation_splits_same_name_far_stores() -> None:
+    transactions = pd.DataFrame(
+        [
+            {
+                CARD: "u1",
+                MERCHANT: "shop",
+                SOURCE_MERCHANT: "shop",
+                TIMESTAMP: pd.Timestamp("2026-01-01 10:00:00"),
+                LONGITUDE: 121.0000,
+                LATITUDE: 31.0000,
+                REGION: "shanghai",
+                DT: "20260101",
+            },
+            {
+                CARD: "u2",
+                MERCHANT: "shop",
+                SOURCE_MERCHANT: "shop",
+                TIMESTAMP: pd.Timestamp("2026-01-01 10:05:00"),
+                LONGITUDE: 121.0010,
+                LATITUDE: 31.0010,
+                REGION: "shanghai",
+                DT: "20260101",
+            },
+            {
+                CARD: "u3",
+                MERCHANT: "shop",
+                SOURCE_MERCHANT: "shop",
+                TIMESTAMP: pd.Timestamp("2026-01-01 10:10:00"),
+                LONGITUDE: 122.0000,
+                LATITUDE: 32.0000,
+                REGION: "shanghai",
+                DT: "20260101",
+            },
+            {
+                CARD: "u4",
+                MERCHANT: "shop",
+                SOURCE_MERCHANT: "shop",
+                TIMESTAMP: pd.Timestamp("2026-01-01 10:15:00"),
+                LONGITUDE: pd.NA,
+                LATITUDE: pd.NA,
+                REGION: "shanghai",
+                DT: "20260101",
+            },
+        ]
+    )
+
+    prepared = prepare_geographic_transactions(transactions, 1000.0)
+
+    merchant_ids = set(prepared.transactions[MERCHANT].astype(str))
+    assert "shop" in merchant_ids
+    split_ids = [
+        merchant_id
+        for merchant_id in merchant_ids
+        if "#geo" in merchant_id
+    ]
+    assert len(split_ids) == 2
+    assert prepared.summary.split_entity_count == 2
 
 
 def test_cds_pmi_matches_base_pmi_when_alpha_is_one() -> None:
@@ -490,6 +626,111 @@ def test_leiden_communities_are_connected_and_deterministic() -> None:
     )
 
 
+def test_pipeline_uses_geographic_seed_and_pmi_to_join_unpositioned_merchant(
+    tmp_path: Path,
+) -> None:
+    transaction_path = tmp_path / "data.txt"
+    rows = [
+        _transaction_row_with_coordinates(
+            "u1",
+            "f1a",
+            "a",
+            "20260101T100000",
+            "121.0000",
+            "31.0000",
+            "shanghai",
+            "20260101",
+        ),
+        _transaction_row_with_coordinates(
+            "u1",
+            "f1x",
+            "x",
+            "20260101T101000",
+            "",
+            "",
+            "shanghai",
+            "20260101",
+        ),
+        _transaction_row_with_coordinates(
+            "u2",
+            "f2b",
+            "b",
+            "20260101T100000",
+            "121.0010",
+            "31.0010",
+            "shanghai",
+            "20260101",
+        ),
+    ]
+    _write_transaction_file(transaction_path, rows)
+
+    output_path = tmp_path / "output"
+    config_path = tmp_path / "city.ini"
+    config_path.write_text(
+        f"""
+[city]
+code = "test-city"
+name = "test-city"
+
+[input]
+transactions_path = "{transaction_path.as_posix()}"
+timestamp_formats = %Y%m%dT%H%M%S
+
+[visits]
+merge_window_minutes = 30
+maximum_daily_merchants_per_card = 30
+
+[cooccurrence]
+window_minutes = 120
+decay_tau_minutes = 60.0
+minimum_unique_users = 1
+
+[graph]
+edge_weight_method = "transaction_count"
+context_smoothing_alpha = 0.75
+sppmi_shift = 1.0
+top_k_neighbors = 5
+minimum_z_score = 0.0
+
+[community]
+algorithm = "leiden"
+resolution = 1.0
+random_seed = 42
+maximum_cleaning_rounds = 1
+minimum_hub_degree = 10
+participation_threshold = 0.9
+
+[geo]
+cluster_radius_meters = 1000.0
+
+[anchors]
+minimum_count = 1
+maximum_count = 2
+merchants_per_anchor = 2
+minimum_community_size = 2
+maximum_participation = 0.99
+chain_visit_count_quantile = 1.0
+chain_minimum_visit_count = 100
+
+[output]
+directory = "{output_path.as_posix()}"
+
+[experiments]
+path = "{(tmp_path / 'experiments.md').as_posix()}"
+""",
+        encoding="utf-8",
+    )
+
+    summary = run_algorithm_one(load_config(config_path))
+
+    result = pd.read_csv(Path(summary.output_directory) / "business_district.csv")
+    communities = result.set_index("storename")["community_id"].to_dict()
+    assert communities["a"] == communities["b"] == communities["x"]
+    assert "地理种子：坐标交易行2行" in (
+        tmp_path / "experiments.md"
+    ).read_text(encoding="utf-8")
+
+
 def test_pipeline_writes_business_output_only(tmp_path: Path) -> None:
     transaction_path = tmp_path / "data.txt"
     rows: list[str] = []
@@ -561,6 +802,9 @@ random_seed = 42
 maximum_cleaning_rounds = 2
 minimum_hub_degree = 10
 participation_threshold = 0.9
+
+[geo]
+cluster_radius_meters = 1000.0
 
 [anchors]
 minimum_count = 1

@@ -62,14 +62,14 @@ python scripts/draw_community_graphs.py merchants.csv community_graphs
 - `global_flow_number`：流水号，必须非空且唯一。
 - `storename`：商户名称，用作聚类商户 ID。
 - `transaction_time`：交易时间，按 `[input].timestamp_formats` 解析。
-- `pos_longitude`：经度，可为空，不参与初始化聚类。
-- `pos_latitude`：纬度，可为空，不参与初始化聚类。
+- `pos_longitude`：经度，可为空；非空时参与 1000 米地理种子聚类。
+- `pos_latitude`：纬度，可为空；非空时参与 1000 米地理种子聚类。
 - `region`：地区，输出使用该商户最新交易时间对应的值。
 - `is_intefere`：输入可为空，初始化聚类忽略该字段。
 - `status`：输入可为空，初始化聚类忽略该字段。
 - `dt`：日期，不参与算法，输出使用该商户最新交易时间对应的值。
 
-商户对构建只使用 `account_number`、`storename` 和 `transaction_time`。经纬度、人工干预、输入状态和 `dt` 不参与算法。
+算法会先读取经纬度并构建地理种子：同一 `storename` 的有坐标交易如果相距超过 `[geo].cluster_radius_meters`，会在内部拆成多个门店实体；随后按地理距离把有坐标门店聚成种子社区，再用交易共现 PMI/交易次数边把无坐标或未进入地理簇的商户接入这些社区。人工干预、输入状态和 `dt` 不参与算法。
 
 ## 输出
 
@@ -135,7 +135,7 @@ Hive 入口输入表必须包含：
 - `is_abnormal`
 - `dt`
 
-`pos_longitude`、`pos_latitude`、`is_interfere` 和 `is_abnormal` 在输入时允许为空，不参与当前聚类逻辑。
+`pos_longitude`、`pos_latitude`、`is_interfere` 和 `is_abnormal` 在输入时允许为空。经纬度只空一列、格式非法或越界时按无坐标处理；有效经纬度会参与初始化地理种子聚类，输出字段保持不变，不额外暴露内部拆分门店 ID。
 
 Hive 参数表 `dev_icamp.icamp_merchant_cluster_algo_param` 必须包含：
 
@@ -180,6 +180,10 @@ Hive 入口写入目标表字段为：
 ```powershell
 python -m pytest
 ```
+
+## 地理种子参数
+
+- `[geo].cluster_radius_meters`：地理种子聚类半径，当前配置为 `1000.0` 米。同名商户的有坐标交易会先按该半径拆成内部门店实体，再参与全局地理种子聚类。
 
 ## 商户对聚类参数
 

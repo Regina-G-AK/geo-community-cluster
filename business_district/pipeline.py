@@ -9,6 +9,10 @@ import pandas as pd
 from business_district.community import CleaningResult, clean_graph
 from business_district.config import AppConfig
 from business_district.experiments import ExperimentContext, append_experiment_record
+from business_district.geo import (
+    add_geographic_seed_edges,
+    prepare_geographic_transactions,
+)
 from business_district.graph import (
     PairStatistics,
     build_pair_statistics,
@@ -63,8 +67,13 @@ def run_algorithm_one_from_transactions(
         config,
         started_at,
     )
-    merchant_metadata = build_merchant_metadata(transactions)
-    visits = merge_visits(transactions, config.visits)
+    geographic_preparation = prepare_geographic_transactions(
+        transactions,
+        config.geo.cluster_radius_meters,
+    )
+    prepared_transactions = geographic_preparation.transactions
+    merchant_metadata = build_merchant_metadata(prepared_transactions)
+    visits = merge_visits(prepared_transactions, config.visits)
     statistics: PairStatistics = build_pair_statistics(
         visits,
         config.cooccurrence,
@@ -73,10 +82,14 @@ def run_algorithm_one_from_transactions(
         statistics,
         output_directory / "pair_statistics.pkl",
     )
-    graph = build_sparse_graph(
+    transaction_graph = build_sparse_graph(
         statistics,
         config.cooccurrence,
         config.graph,
+    )
+    graph = add_geographic_seed_edges(
+        transaction_graph,
+        geographic_preparation.seed_pairs,
     )
     chain_visit_count_threshold = calculate_chain_visit_count_threshold(
         [
@@ -133,10 +146,12 @@ def run_algorithm_one_from_transactions(
         config.experiments.path,
         config,
         statistics,
+        transaction_graph,
         graph,
         cleaning,
         raw_merchants,
         communities,
+        geographic_preparation.summary,
         ExperimentContext(
             source=source,
             source_detail=source_detail,

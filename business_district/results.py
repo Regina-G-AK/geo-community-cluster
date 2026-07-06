@@ -14,7 +14,13 @@ from business_district.community import (
 )
 from business_district.config import AnchorConfig
 from business_district.graph import PairStatistics
-from business_district.transactions import DT, MERCHANT, REGION, TIMESTAMP
+from business_district.transactions import (
+    DT,
+    MERCHANT,
+    REGION,
+    SOURCE_MERCHANT,
+    TIMESTAMP,
+)
 
 COMMUNITY_COLUMNS = [
     "city_code",
@@ -440,6 +446,11 @@ def build_business_results(
     )
     timestamp = update_time.strftime("%Y-%m-%d %H:%M:%S")
     rows: list[dict[str, str | int | float]] = []
+    output_merchant_column = (
+        SOURCE_MERCHANT
+        if SOURCE_MERCHANT in enriched.columns
+        else MERCHANT
+    )
     for row in enriched.itertuples(index=False):
         merchant_id = str(getattr(row, MERCHANT))
         raw_community_id = getattr(row, "community_id")
@@ -465,7 +476,7 @@ def build_business_results(
         )
         rows.append(
             {
-                "storename": merchant_id,
+                "storename": str(getattr(row, output_merchant_column)),
                 "primary_community_id": primary_community_id,
                 "community_id": community_id,
                 "previous_community_id": "",

@@ -52,6 +52,11 @@ class CommunityConfig:
 
 
 @dataclass(frozen=True)
+class GeoConfig:
+    cluster_radius_meters: float
+
+
+@dataclass(frozen=True)
 class AnchorConfig:
     minimum_count: int
     maximum_count: int
@@ -80,6 +85,7 @@ class AppConfig:
     cooccurrence: CooccurrenceConfig
     graph: GraphConfig
     community: CommunityConfig
+    geo: GeoConfig
     anchors: AnchorConfig
     output: OutputConfig
     experiments: ExperimentConfig
@@ -266,6 +272,18 @@ def _minimum_community_size(
     return parameters.minimum_community_size
 
 
+def _geo_config(parser: configparser.ConfigParser) -> GeoConfig:
+    geo = _require_table(parser, "geo")
+    return GeoConfig(
+        cluster_radius_meters=_require_float(
+            geo,
+            "cluster_radius_meters",
+            "geo",
+            0.000001,
+        ),
+    )
+
+
 def _load_config(
     path: Path,
     parameters: AlgorithmRuntimeConfig | None,
@@ -374,6 +392,7 @@ def _load_config(
             ),
             participation_threshold=participation_threshold,
         ),
+        geo=_geo_config(parser),
         anchors=AnchorConfig(
             minimum_count=minimum_anchor_count,
             maximum_count=maximum_anchor_count,
