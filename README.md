@@ -16,7 +16,7 @@ Hive 环境可使用旧线上任务风格入口：
 python -m business_district.hive_task
 ```
 
-该入口读取 `dev_icamp.icamp_merchant_cluster_algo_input` 的 T-1 分区，使用 `configs/shanghai.ini` 中的算法参数运行聚类，并按旧逻辑通过临时表覆盖写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的对应 `dt` 分区。当前算法不生成风险商户结果，`dev_icamp.icamp_merchant_cluster_algo_risk` 保留空结果跳过写入。
+该入口先读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再按参数表中的 `start_date`、`end_date` 和 `region` 读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应日期分区。`configs/shanghai.ini` 只保留静态算法配置，交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供。结果按旧逻辑通过临时表覆盖写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的对应 `dt` 分区。当前算法不生成风险商户结果，`dev_icamp.icamp_merchant_cluster_algo_risk` 保留空结果跳过写入。
 
 Jupyter 环境可直接打开：
 
@@ -24,7 +24,7 @@ Jupyter 环境可直接打开：
 notebooks/run_hive_business_district.ipynb
 ```
 
-notebook 通过 `HiveTaskConfig` 显式传入配置路径、输入表、输出表、临时表和 `dt_expression`，再调用 `run_hive_task(task_config)`，不复制算法逻辑。
+notebook 通过 `HiveTaskConfig` 显式传入配置路径、输入表、参数表、输出表、临时表和 `dt_expression`，再调用 `run_hive_task(task_config)`，不复制算法逻辑。
 
 增量归属 Hive 入口用于把新商户追加归入已有商圈：
 
@@ -32,7 +32,7 @@ notebook 通过 `HiveTaskConfig` 显式传入配置路径、输入表、输出�
 python -m incremental_assignment.hive_task
 ```
 
-该入口读取 `dev_icamp.icamp_merchant_cluster_algo_input` 的 T-1 分区，并读取 `dev_icamp.icamp_cluster_algo_output` 的同日商圈结果作为已有商圈表。已有输出表中已经存在的商户不会重新计算，也不会覆盖写入；任务只对输入表里尚未出现在输出表的商户做增量归属，并通过临时表加 `insert into table` 追加到 `dev_icamp.icamp_cluster_algo_output`。新商户不要求经纬度，入口会复用 `configs/shanghai.ini` 中的到访合并、共现窗口、SPPMI 和互为 top-k 参数计算交易共现图；再按新商户连接到的存量商户商圈标签做加权投票，锚点商户票权使用 `[assignment].anchor_vote_weight` 放大。若最高商圈分数不低于 `[assignment].theta`，且与次高商圈分数差值不低于 `[assignment].delta`，则归入最高分商圈；否则输出 `is_abnormal=suspect_isolated` 且商圈 ID 为空。商圈表必须提供 `community_id`、`storename`、`is_position` 和 `is_abnormal`，其中 `is_abnormal=normal` 且 `community_id` 非空的记录作为存量成员标签，`is_position=1` 的记录作为锚点加权票。
+该入口先读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再按参数表中的 `start_date`、`end_date` 和 `region` 读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应日期分区，并读取 `dev_icamp.icamp_schedule_pufa_commercial_district` 的同日分区作为之前的商圈表；结果通过临时表加 `insert into table` 追加写入 `dev_icamp.icamp_merchant_cluster_algo_output`，写出过程不再读取目标表做去重。新商户不要求经纬度，入口不再读取 `configs/shanghai.ini` 或 `configs/incremental_shanghai.ini`；交易共现窗口、时间衰减和最小支持人数分别来自参数表的 `max_transaction_time_interval`、`transaction_time_interval_weight` 和 `min_transaction_number`。参数表没有提供但增量计算需要的参数仍使用代码内置默认值：30 分钟到访合并、SPPMI、互为 top-k=10、最小 z-score=0.5、锚点票权放大 1.5 倍、最高商圈分数不低于 0.55、与次高商圈分数差值不低于 0.10。增量投票按新商户连接到的存量商圈标签做加权投票；不满足归属阈值时输出 `is_abnormal=suspect_isolated` 且商圈 ID 为空。商圈表支持两种字段口径：算法结果成员表字段 `community_id`、`storename`、`is_position` 和 `is_abnormal`；或商圈档案表字段 `district_id`、`district_name` 和 `status`，其中正常状态的商圈作为可投票标签。
 
 ## 商圈图生成
 
@@ -136,6 +136,19 @@ Hive 入口输入表必须包含：
 - `dt`
 
 `pos_longitude`、`pos_latitude`、`is_interfere` 和 `is_abnormal` 在输入时允许为空，不参与当前聚类逻辑。
+
+Hive 参数表 `dev_icamp.icamp_merchant_cluster_algo_param` 必须包含：
+
+- `start_date`
+- `end_date`
+- `region`
+- `max_transaction_time_interval`
+- `transaction_time_interval_weight`
+- `min_transaction_number`
+- `min_merchant_count`
+- `is_daily`
+
+入口会用参数表的 `region` 和交易表 `region` 关联，并用 `transaction_time` 落在 `[start_date, end_date]` 的记录作为本次算法输入。`max_transaction_time_interval` 映射到共现窗口分钟数，`transaction_time_interval_weight` 映射到交易时间衰减参数，`min_transaction_number` 映射到最小支持交易人数，`min_merchant_count` 映射到有效商圈最小商户数。同一任务分区内多行参数必须使用相同算法参数，否则任务会报错。
 
 Hive 入口写入目标表字段为：
 

@@ -4,7 +4,6 @@ import datetime
 import time
 import tracemalloc
 from dataclasses import dataclass
-from pathlib import Path
 from types import ModuleType
 
 import networkx as nx
@@ -16,9 +15,17 @@ from spdbccc_data import loging as logrecord
 from spdbccc_data import mountCheck
 from spdbccc_data import task as taskfinish
 
-from business_district.config import load_config as load_algorithm_config
+from business_district.config import CooccurrenceConfig, GraphConfig, VisitConfig
 from business_district.errors import TransactionDataError
 from business_district.graph import build_sparse_graph, build_pair_statistics
+from business_district.hive_task import (
+    HiveAlgorithmParameter,
+    PARAMETER_TABLE,
+    build_runtime_config,
+    build_source_dt_list,
+    filter_source_data_by_parameters,
+    load_hive_algorithm_parameters,
+)
 from business_district.transactions import (
     CARD,
     DT,
@@ -32,16 +39,44 @@ from business_district.transactions import (
     keep_first_hive_flow_number_rows,
     merge_visits,
 )
-from incremental_assignment.config import load_config as load_assignment_config
 from incremental_assignment.models import AssignmentConfig
 
 SOURCE_TABLE = "dev_icamp.icamp_merchant_cluster_algo_input"
-COMMUNITY_TABLE = "dev_icamp.icamp_cluster_algo_output"
-TARGET_TABLE = "dev_icamp.icamp_cluster_algo_output"
-TARGET_TEMP_TABLE = "dev_icamp.icamp_cluster_algo_output_incremental_tmp"
-DEFAULT_ASSIGNMENT_CONFIG_PATH = Path("configs/incremental_shanghai.ini")
-DEFAULT_ALGORITHM_CONFIG_PATH = Path("configs/shanghai.ini")
+COMMUNITY_TABLE = "dev_icamp.icamp_schedule_pufa_commercial_district"
+TARGET_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output"
+TARGET_TEMP_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output_incremental_tmp"
 DEFAULT_DT_EXPRESSION = "T-1"
+DEFAULT_TIMESTAMP_FORMATS = (
+    "%Y%m%dT%H%M%S",
+    "%Y%m%d%H%M%S",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y/%m/%d %H:%M:%S",
+)
+DEFAULT_VISIT_CONFIG = VisitConfig(
+    merge_window_minutes=30,
+    maximum_daily_merchants_per_card=30,
+)
+DEFAULT_GRAPH_CONFIG = GraphConfig(
+    edge_weight_method="sppmi",
+    context_smoothing_alpha=0.75,
+    sppmi_shift=3.0,
+    top_k_neighbors=10,
+    minimum_z_score=0.5,
+)
+DEFAULT_ASSIGNMENT_CONFIG = AssignmentConfig(
+    min_observation_days=28,
+    min_unique_users=5,
+    top_k_neighbors=15,
+    anchor_vote_weight=1.5,
+    theta=0.55,
+    delta=0.10,
+    graph_weight=0.6,
+    geo_weight=0.3,
+    customer_weight=0.1,
+    minimum_sigma_meters=200.0,
+    community_assignment_distance_meters=3000.0,
+    city_maximum_distance_meters=50000.0,
+)
 NORMAL_STATUS = "normal"
 SUSPECT_ISOLATED_STATUS = "suspect_isolated"
 SUSPECT_CROSS_REGION_STATUS = "suspect_cross_region"
@@ -74,11 +109,29 @@ SOURCE_REQUIRED_COLUMNS = {
     REGION,
     DT,
 }
-COMMUNITY_REQUIRED_COLUMNS = {
+MEMBER_COMMUNITY_REQUIRED_COLUMNS = {
     "storename",
     "community_id",
     "is_position",
     "is_abnormal",
+}
+DISTRICT_COMMUNITY_REQUIRED_COLUMNS = {
+    "district_id",
+    "district_name",
+    "status",
+}
+ACTIVE_DISTRICT_STATUSES = {
+    "1",
+    "active",
+    "enable",
+    "enabled",
+    "normal",
+    "online",
+    "valid",
+    "启用",
+    "正常",
+    "有效",
+    "上线",
 }
 
 
@@ -98,9 +151,12 @@ class HiveCandidateMerchant:
 
 @dataclass(frozen=True)
 class HiveTaskConfig:
-    assignment_config_path: Path
-    algorithm_config_path: Path
+    timestamp_formats: tuple[str, ...]
+    visit_config: VisitConfig
+    graph_config: GraphConfig
+    assignment_config: AssignmentConfig
     source_table: str
+    parameter_table: str
     community_table: str
     target_table: str
     target_temp_table: str
@@ -119,9 +175,12 @@ class HiveTaskSummary:
 
 def build_default_hive_task_config() -> HiveTaskConfig:
     return HiveTaskConfig(
-        assignment_config_path=DEFAULT_ASSIGNMENT_CONFIG_PATH,
-        algorithm_config_path=DEFAULT_ALGORITHM_CONFIG_PATH,
+        timestamp_formats=DEFAULT_TIMESTAMP_FORMATS,
+        visit_config=DEFAULT_VISIT_CONFIG,
+        graph_config=DEFAULT_GRAPH_CONFIG,
+        assignment_config=DEFAULT_ASSIGNMENT_CONFIG,
         source_table=SOURCE_TABLE,
+        parameter_table=PARAMETER_TABLE,
         community_table=COMMUNITY_TABLE,
         target_table=TARGET_TABLE,
         target_temp_table=TARGET_TEMP_TABLE,
@@ -175,9 +234,12 @@ def _format_hive_id(value: object) -> str:
     if not text:
         return ""
     try:
-        return str(int(float(text)))
-    except ValueError as error:
-        raise TransactionDataError(f"Hive 商圈 ID 格式错误: value={text}") from error
+        numeric = float(text)
+    except ValueError:
+        return text
+    if numeric.is_integer():
+        return str(int(numeric))
+    return text
 
 
 def _parse_transaction_time(
@@ -280,19 +342,45 @@ def load_source_candidates(
     return candidates
 
 
+def build_incremental_cooccurrence_config(
+    parameters: list[HiveAlgorithmParameter],
+    parameter_table: str,
+) -> CooccurrenceConfig:
+    runtime_config = build_runtime_config(parameters, parameter_table)
+    return CooccurrenceConfig(
+        window_minutes=runtime_config.window_minutes,
+        decay_tau_minutes=runtime_config.decay_tau_minutes,
+        minimum_unique_users=runtime_config.minimum_unique_users,
+    )
+
+
 def _existing_storenames(community_data: pd.DataFrame) -> set[str]:
+    if "storename" in community_data.columns:
+        column = "storename"
+    elif "district_name" in community_data.columns:
+        column = "district_name"
+    else:
+        return set()
     return {
         _clean_text(value)
-        for value in community_data["storename"].tolist()
+        for value in community_data[column].tolist()
         if _clean_text(value)
     }
 
 
-def build_community_members(
+def _is_active_district_status(value: object) -> bool:
+    return _clean_text(value).lower() in ACTIVE_DISTRICT_STATUSES
+
+
+def _build_member_table_community_members(
     community_data: pd.DataFrame,
     community_table: str,
 ) -> dict[str, CommunityMember]:
-    community = _require_columns(community_data, COMMUNITY_REQUIRED_COLUMNS, community_table)
+    community = _require_columns(
+        community_data,
+        MEMBER_COMMUNITY_REQUIRED_COLUMNS,
+        community_table,
+    )
     members: dict[str, CommunityMember] = {}
     for row in community.to_dict("records"):
         storename = _clean_text(row["storename"])
@@ -307,10 +395,57 @@ def build_community_members(
             community_id=community_id,
             is_anchor=is_anchor,
         )
+    return members
+
+
+def _build_district_table_community_members(
+    community_data: pd.DataFrame,
+    community_table: str,
+) -> dict[str, CommunityMember]:
+    community = _require_columns(
+        community_data,
+        DISTRICT_COMMUNITY_REQUIRED_COLUMNS,
+        community_table,
+    )
+    members: dict[str, CommunityMember] = {}
+    for row in community.to_dict("records"):
+        storename = _clean_text(row["district_name"])
+        community_id = _format_hive_id(row["district_id"])
+        if not storename or not community_id:
+            continue
+        if not _is_active_district_status(row["status"]):
+            continue
+        members[storename] = CommunityMember(
+            storename=storename,
+            community_id=community_id,
+            is_anchor=True,
+        )
+    return members
+
+
+def build_community_members(
+    community_data: pd.DataFrame,
+    community_table: str,
+) -> dict[str, CommunityMember]:
+    columns = set(community_data.columns.astype("string").str.strip())
+    if MEMBER_COMMUNITY_REQUIRED_COLUMNS.issubset(columns):
+        members = _build_member_table_community_members(community_data, community_table)
+    elif DISTRICT_COMMUNITY_REQUIRED_COLUMNS.issubset(columns):
+        members = _build_district_table_community_members(community_data, community_table)
+    else:
+        required_options = [
+            sorted(MEMBER_COMMUNITY_REQUIRED_COLUMNS),
+            sorted(DISTRICT_COMMUNITY_REQUIRED_COLUMNS),
+        ]
+        raise TransactionDataError(
+            "Hive 商圈表缺少可用字段组: "
+            f"table={community_table}, required_options={required_options}"
+        )
     if not members:
         raise TransactionDataError(
-            "Hive 商圈表没有可用存量商户标签: "
-            f"table={community_table}, required=community_id not empty and is_abnormal normal"
+            "Hive 商圈表没有可用存量商圈标签: "
+            f"table={community_table}, "
+            "required=member table normal rows or active district rows"
         )
     return members
 
@@ -433,10 +568,6 @@ def insert_new_target_rows(
                 partition (dt={dt_value})
                 select {select_columns}
                 from {temp_table_name} source
-                left join {table_name} target
-                  on target.dt = '{dt_value}'
-                 and target.storename = source.storename
-                where target.storename is null
                 """
             )
         finally:
@@ -456,21 +587,46 @@ class TaskMain:
             total_start = time.time()
             self.dt_var = str(dtDate.dt_date(self.task_config.dt_expression))
             logrecord.log_data(f"incremental task dt={self.dt_var}")
-            dt_list = [self.dt_var]
-            source_data = sd.read_table(self.task_config.source_table, dt=dt_list)
-            community_data = sd.read_table(self.task_config.community_table, dt=dt_list)
-            algorithm_config = load_algorithm_config(self.task_config.algorithm_config_path)
-            assignment_config = load_assignment_config(self.task_config.assignment_config_path)
-            transactions = load_incremental_transactions(
+            parameter_dt_list = [self.dt_var]
+            parameter_data = sd.read_table(
+                self.task_config.parameter_table,
+                dt=parameter_dt_list,
+            )
+            parameters = load_hive_algorithm_parameters(
+                parameter_data,
+                self.task_config.parameter_table,
+            )
+            cooccurrence_config = build_incremental_cooccurrence_config(
+                parameters,
+                self.task_config.parameter_table,
+            )
+            source_dt_list = build_source_dt_list(parameters)
+            logrecord.log_data(
+                f"incremental task parameter_dt={parameter_dt_list}, "
+                f"source_dt={source_dt_list}"
+            )
+            source_data = sd.read_table(self.task_config.source_table, dt=source_dt_list)
+            community_data = sd.read_table(
+                self.task_config.community_table,
+                dt=parameter_dt_list,
+            )
+            filtered_source_data = filter_source_data_by_parameters(
                 source_data,
-                algorithm_config.input.timestamp_formats,
+                parameters,
+                self.task_config.timestamp_formats,
+                self.task_config.source_table,
+                self.task_config.parameter_table,
+            )
+            transactions = load_incremental_transactions(
+                filtered_source_data,
+                self.task_config.timestamp_formats,
                 self.task_config.source_table,
             )
-            visits = merge_visits(transactions, algorithm_config.visits)
+            visits = merge_visits(transactions, self.task_config.visit_config)
             graph = build_sparse_graph(
-                build_pair_statistics(visits, algorithm_config.cooccurrence),
-                algorithm_config.cooccurrence,
-                algorithm_config.graph,
+                build_pair_statistics(visits, cooccurrence_config),
+                cooccurrence_config,
+                self.task_config.graph_config,
             )
             members = build_community_members(
                 community_data,
@@ -485,7 +641,7 @@ class TaskMain:
                 candidates,
                 graph,
                 members,
-                assignment_config.assignment,
+                self.task_config.assignment_config,
                 datetime.datetime.now().astimezone(),
             )
             insert_new_target_rows(
@@ -500,7 +656,7 @@ class TaskMain:
             )
             return HiveTaskSummary(
                 dt=self.dt_var,
-                source_rows=len(source_data),
+                source_rows=len(filtered_source_data),
                 community_rows=len(community_data),
                 candidate_count=len(candidates),
                 inserted_rows=len(target_output),

@@ -85,6 +85,14 @@ class AppConfig:
     experiments: ExperimentConfig
 
 
+@dataclass(frozen=True)
+class AlgorithmRuntimeConfig:
+    window_minutes: int
+    decay_tau_minutes: float
+    minimum_unique_users: int
+    minimum_community_size: int
+
+
 def _read_config_parser(path: Path) -> configparser.ConfigParser:
     parser = configparser.ConfigParser(interpolation=None)
     parser.optionxform = str
@@ -212,7 +220,56 @@ def _resolve_path(config_path: Path, value: str) -> Path:
     return (config_path.parent / path).resolve()
 
 
-def load_config(path: Path) -> AppConfig:
+def _cooccurrence_config(
+    data: configparser.SectionProxy,
+    parameters: AlgorithmRuntimeConfig | None,
+) -> CooccurrenceConfig:
+    if parameters is None:
+        return CooccurrenceConfig(
+            window_minutes=_require_int(
+                data,
+                "window_minutes",
+                "cooccurrence",
+                1,
+            ),
+            decay_tau_minutes=_require_float(
+                data,
+                "decay_tau_minutes",
+                "cooccurrence",
+                0.000001,
+            ),
+            minimum_unique_users=_require_int(
+                data,
+                "minimum_unique_users",
+                "cooccurrence",
+                1,
+            ),
+        )
+    return CooccurrenceConfig(
+        window_minutes=parameters.window_minutes,
+        decay_tau_minutes=parameters.decay_tau_minutes,
+        minimum_unique_users=parameters.minimum_unique_users,
+    )
+
+
+def _minimum_community_size(
+    data: configparser.SectionProxy,
+    parameters: AlgorithmRuntimeConfig | None,
+) -> int:
+    if parameters is None:
+        return _require_int(
+            data,
+            "minimum_community_size",
+            "anchors",
+            1,
+        )
+    return parameters.minimum_community_size
+
+
+def _load_config(
+    path: Path,
+    parameters: AlgorithmRuntimeConfig | None,
+) -> AppConfig:
     if not path.exists():
         raise ConfigurationError(f"配置文件不存在: {path}")
 
@@ -291,26 +348,7 @@ def load_config(path: Path) -> AppConfig:
                 1,
             ),
         ),
-        cooccurrence=CooccurrenceConfig(
-            window_minutes=_require_int(
-                cooccurrence,
-                "window_minutes",
-                "cooccurrence",
-                1,
-            ),
-            decay_tau_minutes=_require_float(
-                cooccurrence,
-                "decay_tau_minutes",
-                "cooccurrence",
-                0.000001,
-            ),
-            minimum_unique_users=_require_int(
-                cooccurrence,
-                "minimum_unique_users",
-                "cooccurrence",
-                1,
-            ),
-        ),
+        cooccurrence=_cooccurrence_config(cooccurrence, parameters),
         graph=GraphConfig(
             edge_weight_method=_edge_weight_method(graph),
             context_smoothing_alpha=smoothing_alpha,
@@ -345,12 +383,7 @@ def load_config(path: Path) -> AppConfig:
                 "anchors",
                 1,
             ),
-            minimum_community_size=_require_int(
-                anchors,
-                "minimum_community_size",
-                "anchors",
-                1,
-            ),
+            minimum_community_size=_minimum_community_size(anchors, parameters),
             maximum_participation=maximum_anchor_participation,
             chain_visit_count_quantile=chain_visit_count_quantile,
             chain_minimum_visit_count=_require_int(
@@ -373,3 +406,14 @@ def load_config(path: Path) -> AppConfig:
             ),
         ),
     )
+
+
+def load_config(path: Path) -> AppConfig:
+    return _load_config(path, None)
+
+
+def load_config_with_runtime_parameters(
+    path: Path,
+    parameters: AlgorithmRuntimeConfig,
+) -> AppConfig:
+    return _load_config(path, parameters)
