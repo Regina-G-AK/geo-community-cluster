@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 from datetime import datetime
 
 import networkx as nx
@@ -605,14 +604,3 @@ def build_community_results(
             }
         )
     return pd.DataFrame(rows, columns=COMMUNITY_COLUMNS)
-
-
-def write_outputs(
-    output_directory: Path,
-    business_results: pd.DataFrame,
-) -> None:
-    business_results.to_csv(
-        output_directory / "business_district.csv",
-        index=False,
-        encoding="utf-8-sig",
-    )

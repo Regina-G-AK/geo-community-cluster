@@ -2,13 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-import time
 
 import pandas as pd
 
 from business_district.community import CleaningResult, clean_graph
 from business_district.config import AppConfig
-from business_district.experiments import ExperimentContext, append_experiment_record
 from business_district.geo import (
     add_geographic_seed_edges,
     prepare_geographic_transactions,
@@ -28,7 +26,6 @@ from business_district.results import (
     calculate_chain_visit_count_threshold,
     filter_merchants_by_community_size,
     identify_chain_like_merchants,
-    write_outputs,
 )
 from business_district.run_directory import create_run_directory
 from business_district.transactions import (
@@ -61,7 +58,6 @@ def run_algorithm_one_from_transactions(
     source_detail: str,
 ) -> RunResult:
     started_at = datetime.now().astimezone()
-    started = time.perf_counter()
     output_directory = create_run_directory(
         config.output.directory,
         config,
@@ -137,30 +133,6 @@ def run_algorithm_one_from_transactions(
         merchant_metadata,
         started_at,
         config.anchors.minimum_community_size,
-    )
-    write_outputs(
-        output_directory,
-        business_results,
-    )
-    append_experiment_record(
-        config.experiments.path,
-        config,
-        statistics,
-        transaction_graph,
-        graph,
-        cleaning,
-        raw_merchants,
-        communities,
-        geographic_preparation.summary,
-        ExperimentContext(
-            source=source,
-            source_detail=source_detail,
-            input_rows=len(transactions),
-            visit_rows=len(visits),
-            duration_seconds=time.perf_counter() - started,
-            started_at=started_at,
-            output_directory=output_directory,
-        ),
     )
     return RunResult(
         summary=RunSummary(

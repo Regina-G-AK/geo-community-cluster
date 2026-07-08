@@ -17,6 +17,42 @@ def _install_spdbccc_data_stub(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "spdbccc_data", spdbccc_data)
 
 
+def test_read_partitioned_hive_table_reads_part_files_and_adds_dt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("business_district.hive_task")
+    monkeypatch.setattr(hive_task, "HIVE_TABLE_ROOT", tmp_path)
+    first_partition = tmp_path / "input_table" / "dt=20260101"
+    second_partition = tmp_path / "input_table" / "dt=20260102"
+    first_partition.mkdir(parents=True)
+    second_partition.mkdir(parents=True)
+    pd.DataFrame([{"storename": "a"}]).to_parquet(
+        first_partition / "part-000.parquet",
+        index=False,
+    )
+    pd.DataFrame([{"storename": "b"}]).to_parquet(
+        first_partition / "part-001.parquet",
+        index=False,
+    )
+    pd.DataFrame([{"storename": "c"}]).to_parquet(
+        second_partition / "part-000.parquet",
+        index=False,
+    )
+
+    result = hive_task.read_partitioned_hive_table(
+        "dev_icamp.input_table",
+        ["20260101", "20260102"],
+    )
+
+    assert result.to_dict(orient="records") == [
+        {"storename": "a", "dt": "20260101"},
+        {"storename": "b", "dt": "20260101"},
+        {"storename": "c", "dt": "20260102"},
+    ]
+
+
 def test_hive_target_output_formats_active_status_as_normal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -106,9 +142,6 @@ chain_minimum_visit_count = 100
 
 [output]
 directory = "{(tmp_path / 'output').as_posix()}"
-
-[experiments]
-path = "{(tmp_path / 'experiments.md').as_posix()}"
 """,
         encoding="utf-8",
     )

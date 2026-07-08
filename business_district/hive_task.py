@@ -26,11 +26,10 @@ from business_district.transactions import RAW_TIMESTAMP, REGION, load_hive_tran
 SOURCE_TABLE = "dev_icamp.icamp_merchant_cluster_algo_input"
 PARAMETER_TABLE = "dev_icamp.icamp_merchant_cluster_algo_param"
 TARGET_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output"
-RISK_TARGET_TABLE = "dev_icamp.icamp_merchant_cluster_algo_risk"
 TARGET_TEMP_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output_tmp"
-RISK_TARGET_TEMP_TABLE = "dev_icamp.icamp_merchant_cluster_algo_risk_tmp"
 DEFAULT_CONFIG_PATH = Path("configs/shanghai.ini")
 DEFAULT_DT_EXPRESSION = "T-1"
+HIVE_TABLE_ROOT = Path("/appdata/project/yw061178/tbl")
 TARGET_COLUMNS = [
     "storename",
     "community_id",
@@ -73,15 +72,98 @@ def _split_hive_table(full_table_name: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
+def _hive_storage_table_name(full_table_name: str) -> str:
+    text = full_table_name.strip()
+    parts = text.split(".")
+    if len(parts) == 2 and parts[0] and parts[1]:
+        return parts[1]
+    if len(parts) == 1 and parts[0]:
+        return parts[0]
+    raise TransactionDataError(f"Hive 表名格式错误: table={full_table_name!r}")
+
+
+def _hive_partition_path(table_name: str, dt_value: str) -> Path:
+    return HIVE_TABLE_ROOT / _hive_storage_table_name(table_name) / f"dt={dt_value}"
+
+
+def _hive_partition_part_files(
+    partition_path: Path,
+    table_name: str,
+    dt_value: str,
+) -> list[Path]:
+    if not partition_path.exists():
+        raise TransactionDataError(
+            "Hive 分区目录不存在: "
+            f"table={table_name}, dt={dt_value}, path={partition_path}"
+        )
+    files = [
+        path
+        for path in sorted(partition_path.rglob("part*"))
+        if path.is_file()
+    ]
+    if not files:
+        raise TransactionDataError(
+            "Hive 分区目录没有 part 文件: "
+            f"table={table_name}, dt={dt_value}, path={partition_path}"
+        )
+    return files
+
+
+def _read_hive_part_file(
+    file_path: Path,
+    table_name: str,
+    dt_value: str,
+) -> pd.DataFrame:
+    try:
+        return pd.read_parquet(file_path)
+    except (OSError, ValueError, ImportError) as error:
+        raise TransactionDataError(
+            "Hive 分片 parquet 读取失败: "
+            f"table={table_name}, dt={dt_value}, path={file_path}, reason={error}"
+        ) from error
+
+
+def _with_partition_dt(dataframe: pd.DataFrame, dt_value: str) -> pd.DataFrame:
+    if "dt" in dataframe.columns:
+        return dataframe
+    result = dataframe.copy()
+    result["dt"] = dt_value
+    return result
+
+
+def read_partitioned_hive_table(
+    table_name: str,
+    dt_values: list[str],
+) -> pd.DataFrame:
+    if not dt_values:
+        raise TransactionDataError(f"Hive 读表 dt 不能为空: table={table_name}")
+
+    dataframes: list[pd.DataFrame] = []
+    for dt_value in dt_values:
+        dt_text = str(dt_value)
+        partition_path = _hive_partition_path(table_name, dt_text)
+        for file_path in _hive_partition_part_files(
+            partition_path,
+            table_name,
+            dt_text,
+        ):
+            dataframes.append(
+                _with_partition_dt(
+                    _read_hive_part_file(file_path, table_name, dt_text),
+                    dt_text,
+                )
+            )
+
+    return pd.concat(dataframes, ignore_index=True, copy=False)
+
+
 @dataclass(frozen=True)
 class HiveTaskConfig:
     config_path: Path
     source_table: str
     parameter_table: str
     target_table: str
-    risk_target_table: str
     target_temp_table: str
-    risk_target_temp_table: str
     dt_expression: str
 
 
@@ -113,9 +195,7 @@ def build_default_hive_task_config() -> HiveTaskConfig:
         source_table=SOURCE_TABLE,
         parameter_table=PARAMETER_TABLE,
         target_table=TARGET_TABLE,
-        risk_target_table=RISK_TARGET_TABLE,
         target_temp_table=TARGET_TEMP_TABLE,
-        risk_target_temp_table=RISK_TARGET_TEMP_TABLE,
         dt_expression=DEFAULT_DT_EXPRESSION,
     )
 
@@ -425,10 +505,6 @@ def build_hive_target_output(
     return output.reset_index(drop=True)
 
 
-def build_empty_risk_output() -> pd.DataFrame:
-    return pd.DataFrame(columns=TARGET_COLUMNS)
-
-
 def overwrite_target_table(
     sd: ModuleType,
     result: pd.DataFrame,
@@ -470,9 +546,9 @@ class TaskMain:
             self.dt_var = str(dtDate.dt_date(self.task_config.dt_expression))
             logrecord.log_data(f"task dt={self.dt_var}")
             parameter_dt_list = [self.dt_var]
-            parameter_data = sd.read_table(
+            parameter_data = read_partitioned_hive_table(
                 self.task_config.parameter_table,
-                dt=parameter_dt_list,
+                parameter_dt_list,
             )
             parameter_data.columns = parameter_data.columns.astype("string").str.strip()
             parameters = load_hive_algorithm_parameters(
@@ -491,9 +567,9 @@ class TaskMain:
             logrecord.log_data(
                 f"task parameter_dt={parameter_dt_list}, source_dt={source_dt_list}"
             )
-            source_data = sd.read_table(
+            source_data = read_partitioned_hive_table(
                 self.task_config.source_table,
-                dt=source_dt_list,
+                source_dt_list,
             )
             source_data.columns = source_data.columns.astype("string").str.strip()
             filtered_source_data = filter_source_data_by_parameters(
@@ -527,12 +603,6 @@ class TaskMain:
                 self.task_config.target_table,
                 self.task_config.target_temp_table,
             )
-            overwrite_target_table(
-                sd,
-                build_empty_risk_output(),
-                self.task_config.risk_target_table,
-                self.task_config.risk_target_temp_table,
-            )
             logrecord.log_data(
                 f"taskrun seconds={time.time() - total_start:.2f}, "
                 f"output_rows={len(target_output)}, "
@@ -554,17 +624,14 @@ class TaskMain:
 
     def destroy(self) -> None:
         errors: list[Exception] = []
-        for table_name in [
-            self.task_config.target_temp_table,
-            self.task_config.risk_target_temp_table,
-        ]:
-            try:
-                sd.execute_sql(f"drop table if exists {table_name}")
-            except Exception as error:
-                errors.append(error)
-                logrecord.log_data(
-                    f"drop temp table failed table={table_name}, error={error}"
-                )
+        table_name = self.task_config.target_temp_table
+        try:
+            sd.execute_sql(f"drop table if exists {table_name}")
+        except Exception as error:
+            errors.append(error)
+            logrecord.log_data(
+                f"drop temp table failed table={table_name}, error={error}"
+            )
         if errors:
             raise RuntimeError(
                 f"Hive 临时表清理失败: failed_count={len(errors)}"

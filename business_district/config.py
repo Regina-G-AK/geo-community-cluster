@@ -73,11 +73,6 @@ class OutputConfig:
 
 
 @dataclass(frozen=True)
-class ExperimentConfig:
-    path: Path
-
-
-@dataclass(frozen=True)
 class AppConfig:
     city: CityConfig
     input: InputConfig
@@ -88,7 +83,6 @@ class AppConfig:
     geo: GeoConfig
     anchors: AnchorConfig
     output: OutputConfig
-    experiments: ExperimentConfig
 
 
 @dataclass(frozen=True)
@@ -300,7 +294,6 @@ def _load_config(
     community = _require_table(parser, "community")
     anchors = _require_table(parser, "anchors")
     output = _require_table(parser, "output")
-    experiments = _require_table(parser, "experiments")
 
     minimum_anchor_count = _require_int(anchors, "minimum_count", "anchors", 1)
     maximum_anchor_count = _require_int(anchors, "maximum_count", "anchors", 1)
@@ -416,12 +409,6 @@ def _load_config(
             directory=_resolve_path(
                 path,
                 _require_string(output, "directory", "output"),
-            ),
-        ),
-        experiments=ExperimentConfig(
-            path=_resolve_path(
-                path,
-                _require_string(experiments, "path", "experiments"),
             ),
         ),
     )

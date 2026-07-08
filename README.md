@@ -1,6 +1,6 @@
 # 商圈初始化聚类
 
-本项目实现基于交易共现关系的商圈初始化聚类。主流程直接读取原始交易数据，在内存中构建商户对、商户图和社区结果，输出业务结果表，并在同一次运行目录保留可复用的商户对中间文件。
+本项目实现基于交易共现关系的商圈初始化聚类。主流程直接读取原始交易数据，在内存中构建商户对、商户图和社区结果；本地运行目录只保留可复用的商户对中间文件，Hive 入口负责写入商圈业务结果表。
 
 ## 运行
 
@@ -8,7 +8,7 @@
 python -m business_district --config configs/shanghai.ini
 ```
 
-每次运行会在 `[output].directory` 下创建 `{edge_weight_method}_{community_algorithm}_{YYMMDDHHMMSS}` 格式的独立目录，避免覆盖历史结果。成功落盘后会向 `[experiments].path` 追加实验记录。
+每次运行会在 `[output].directory` 下创建 `{edge_weight_method}_{community_algorithm}_{YYMMDDHHMMSS}` 格式的独立目录，避免覆盖历史中间文件。
 
 Hive 环境可使用旧线上任务风格入口：
 
@@ -16,7 +16,9 @@ Hive 环境可使用旧线上任务风格入口：
 python -m business_district.hive_task
 ```
 
-该入口先读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再按参数表中的 `start_date`、`end_date` 和 `region` 读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应日期分区。`configs/shanghai.ini` 只保留静态算法配置，交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供。结果按旧逻辑通过临时表覆盖写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的对应 `dt` 分区。当前算法不生成风险商户结果，`dev_icamp.icamp_merchant_cluster_algo_risk` 保留空结果跳过写入。
+该入口先读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再按参数表中的 `start_date`、`end_date` 和 `region` 读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应日期分区。`configs/shanghai.ini` 只保留静态算法配置，交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供。结果通过临时表覆盖写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的对应 `dt` 分区，不再写入风险商户表。
+
+Hive 入口读表会按 `/appdata/project/yw061178/tbl/{表名}/dt={日期}/part*` 分片读取 parquet 文件并合并；当分片数据缺少 `dt` 列时会按分区日期自动补齐。
 
 Jupyter 环境可直接打开：
 
@@ -73,54 +75,13 @@ python scripts/draw_community_graphs.py merchants.csv community_graphs
 
 ## 输出
 
-主流程输出业务结果表：
-
-```text
-business_district.csv
-```
-
-字段如下：
-
-- `storename`
-- `primary_community_id`
-- `community_id`
-- `previous_community_id`
-- `region`
-- `is_interfere`
-- `update_time`
-- `status`
-- `is_position`
-- `community_share`
-- `is_primary_community`
-- `is_multi_community_member`
-- `is_chain_like`
-- `chain_reason`
-- `chain_visit_count_threshold`
-- `connected_community_count`
-- `dt`
-
-初始化聚类输出规则：
-
-- `previous_community_id` 固定为空。
-- `is_interfere` 固定为 `0`。
-- `update_time` 格式为 `%Y-%m-%d %H:%M:%S`。
-- `primary_community_id` 表示主社区，`community_id` 表示本行挂靠社区；疑似线上、疑似孤立商户为空。
-- `is_position` 表示是否为主社区锚点商户。
-- `community_share` 表示商户挂靠到本行商圈的边权占比。
-- `is_primary_community` 表示本行是否为商户主社区。
-- `is_multi_community_member` 表示商户是否被展开到多个商圈。
-- `is_chain_like` 表示是否在聚类前命中访问量型连锁/泛客群规则。
-- `chain_reason` 为空或 `visit_count`。
-- `chain_visit_count_threshold` 是本次运行访问量规则使用的阈值。
-- `connected_community_count` 是普通商户在最终清洗图中连接到的社区数；连锁/泛客群商户使用聚类前候选边连接到的已有商圈数。
-
-同一运行目录还会写入商户对中间文件：
+主流程本地运行目录只写入商户对中间文件：
 
 ```text
 pair_statistics.pkl
 ```
 
-该文件是 pickle 格式的 `PairStatistics` 对象，包含 `strengths`、`supports` 和 `merchant_visit_counts`，用于复用商户对统计结果重新执行后续聚类实验。文件与业务 CSV 都保留在本地运行目录，不在当前包内写入 Hive。
+该文件是 pickle 格式的 `PairStatistics` 对象，包含 `strengths`、`supports` 和 `merchant_visit_counts`，用于复用商户对统计结果重新执行后续聚类实验。本地运行不再写出业务 CSV 或实验记录文件。
 
 Hive 入口输入表必须包含：
 

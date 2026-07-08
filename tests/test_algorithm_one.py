@@ -23,7 +23,9 @@ from business_district.graph import (
     build_pair_statistics,
     build_sparse_graph,
 )
-from business_district.pipeline import run_algorithm_one
+from business_district.pipeline import (
+    run_algorithm_one_from_transactions,
+)
 from business_district.results import build_business_results, build_merchant_results
 from business_district.transactions import (
     CARD,
@@ -160,9 +162,6 @@ chain_minimum_visit_count = 100
 
 [output]
 directory = "{(tmp_path / 'output').as_posix()}"
-
-[experiments]
-path = "{(tmp_path / 'experiments.md').as_posix()}"
 """,
         encoding="utf-8",
     )
@@ -714,24 +713,24 @@ chain_minimum_visit_count = 100
 
 [output]
 directory = "{output_path.as_posix()}"
-
-[experiments]
-path = "{(tmp_path / 'experiments.md').as_posix()}"
 """,
         encoding="utf-8",
     )
 
-    summary = run_algorithm_one(load_config(config_path))
+    config = load_config(config_path)
+    run_result = run_algorithm_one_from_transactions(
+        config,
+        load_transactions(config.input),
+        "test",
+        "test",
+    )
 
-    result = pd.read_csv(Path(summary.output_directory) / "business_district.csv")
+    result = run_result.business_results
     communities = result.set_index("storename")["community_id"].to_dict()
     assert communities["a"] == communities["b"] == communities["x"]
-    assert "地理种子：坐标交易行2行" in (
-        tmp_path / "experiments.md"
-    ).read_text(encoding="utf-8")
 
 
-def test_pipeline_writes_business_output_only(tmp_path: Path) -> None:
+def test_pipeline_writes_intermediate_output_only(tmp_path: Path) -> None:
     transaction_path = tmp_path / "data.txt"
     rows: list[str] = []
     for user_index in range(8):
@@ -817,26 +816,29 @@ chain_minimum_visit_count = 100
 
 [output]
 directory = "{output_path.as_posix()}"
-
-[experiments]
-path = "{(tmp_path / 'experiments.md').as_posix()}"
 """,
         encoding="utf-8",
     )
 
-    summary = run_algorithm_one(load_config(config_path))
+    config = load_config(config_path)
+    run_result = run_algorithm_one_from_transactions(
+        config,
+        load_transactions(config.input),
+        "test",
+        "test",
+    )
+    summary = run_result.summary
 
     run_directory = Path(summary.output_directory)
     assert run_directory.parent == output_path
     assert re.fullmatch(r"transaction_count_leiden_\d{12}", run_directory.name)
     assert sorted(path.name for path in run_directory.iterdir()) == [
-        "business_district.csv",
-        "pair_statistics.pkl",
+        "pair_statistics.pkl"
     ]
     assert summary.merchant_count == 4
     assert summary.community_count == 1
 
-    result = pd.read_csv(run_directory / "business_district.csv")
+    result = run_result.business_results
     assert list(result.columns) == [
         "storename",
         "primary_community_id",
@@ -867,7 +869,7 @@ path = "{(tmp_path / 'experiments.md').as_posix()}"
     assert str(merchant_a["dt"]) == "20260102"
     assert merchant_a["status"] == "normal"
     assert merchant_d["status"] == "suspect_isolated"
-    assert pd.isna(merchant_d["community_id"])
+    assert merchant_d["community_id"] == ""
     assert merchant_a["is_chain_like"] == 0
     assert merchant_a["is_primary_community"] == 1
     assert merchant_a["community_share"] == 1.0
@@ -878,6 +880,4 @@ path = "{(tmp_path / 'experiments.md').as_posix()}"
     assert len(pair_statistics.strengths) == 3
     assert len(pair_statistics.merchant_visit_counts) == 4
 
-    experiment_text = (tmp_path / "experiments.md").read_text(encoding="utf-8")
-    assert "原始交易" in experiment_text
-    assert "连锁/泛客群商户" in experiment_text
+    assert not (tmp_path / "experiments.md").exists()
