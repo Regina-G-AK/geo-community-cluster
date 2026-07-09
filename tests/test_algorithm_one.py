@@ -1,6 +1,5 @@
 import math
 import pickle
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -829,11 +828,10 @@ directory = "{output_path.as_posix()}"
     )
     summary = run_result.summary
 
-    run_directory = Path(summary.output_directory)
-    assert run_directory.parent == output_path
-    assert re.fullmatch(r"transaction_count_leiden_\d{12}", run_directory.name)
-    assert sorted(path.name for path in run_directory.iterdir()) == [
-        "pair_statistics.pkl"
+    output_directory = Path(summary.output_directory)
+    assert output_directory == output_path
+    assert sorted(path.name for path in output_directory.iterdir()) == [
+        "pair_statistics_test-city.pkl"
     ]
     assert summary.merchant_count == 4
     assert summary.community_count == 1
@@ -875,7 +873,7 @@ directory = "{output_path.as_posix()}"
     assert merchant_a["community_share"] == 1.0
     assert merchant_a["chain_visit_count_threshold"] == 100
 
-    with (run_directory / "pair_statistics.pkl").open("rb") as file:
+    with (output_directory / "pair_statistics_test-city.pkl").open("rb") as file:
         pair_statistics = pickle.load(file)
     assert len(pair_statistics.strengths) == 3
     assert len(pair_statistics.merchant_visit_counts) == 4

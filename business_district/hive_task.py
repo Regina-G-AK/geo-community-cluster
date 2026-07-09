@@ -21,6 +21,7 @@ from business_district.config import (
 )
 from business_district.errors import TransactionDataError
 from business_district.pipeline import run_algorithm_one_from_transactions
+from business_district.resource_usage import record_resource_phase
 from business_district.transactions import RAW_TIMESTAMP, REGION, load_hive_transactions
 
 SOURCE_TABLE = "dev_icamp.icamp_merchant_cluster_algo_input"
@@ -29,7 +30,7 @@ TARGET_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output"
 TARGET_TEMP_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output_tmp"
 DEFAULT_CONFIG_PATH = Path("configs/shanghai.ini")
 DEFAULT_DT_EXPRESSION = "T-1"
-HIVE_TABLE_ROOT = Path("/appdata/project/yw061178/tbl")
+HIVE_TABLE_ROOT = Path("/appdata/project/fid_bg_icmp/tbl")
 TARGET_COLUMNS = [
     "storename",
     "community_id",
@@ -550,6 +551,7 @@ class TaskMain:
                 self.task_config.parameter_table,
                 parameter_dt_list,
             )
+            record_resource_phase("Hive参数表读取")
             parameter_data.columns = parameter_data.columns.astype("string").str.strip()
             parameters = load_hive_algorithm_parameters(
                 parameter_data,
@@ -563,6 +565,7 @@ class TaskMain:
                 self.task_config.config_path,
                 runtime_config,
             )
+            record_resource_phase("Hive参数解析")
             source_dt_list = build_source_dt_list(parameters)
             logrecord.log_data(
                 f"task parameter_dt={parameter_dt_list}, source_dt={source_dt_list}"
@@ -571,6 +574,7 @@ class TaskMain:
                 self.task_config.source_table,
                 source_dt_list,
             )
+            record_resource_phase("Hive输入表读取")
             source_data.columns = source_data.columns.astype("string").str.strip()
             filtered_source_data = filter_source_data_by_parameters(
                 source_data,
@@ -579,12 +583,14 @@ class TaskMain:
                 self.task_config.source_table,
                 self.task_config.parameter_table,
             )
+            record_resource_phase("Hive输入过滤")
             transactions = load_hive_transactions(
                 filtered_source_data,
                 config.input.timestamp_formats,
                 self.dt_var,
                 self.task_config.source_table,
             )
+            record_resource_phase("Hive交易转换")
             result = run_algorithm_one_from_transactions(
                 config,
                 transactions,
@@ -597,12 +603,14 @@ class TaskMain:
             target_output = build_hive_target_output(
                 result.business_results,
             )
+            record_resource_phase("Hive输出构建")
             overwrite_target_table(
                 sd,
                 target_output,
                 self.task_config.target_table,
                 self.task_config.target_temp_table,
             )
+            record_resource_phase("Hive结果写入")
             logrecord.log_data(
                 f"taskrun seconds={time.time() - total_start:.2f}, "
                 f"output_rows={len(target_output)}, "
@@ -627,6 +635,7 @@ class TaskMain:
         table_name = self.task_config.target_temp_table
         try:
             sd.execute_sql(f"drop table if exists {table_name}")
+            record_resource_phase("Hive任务清理")
         except Exception as error:
             errors.append(error)
             logrecord.log_data(

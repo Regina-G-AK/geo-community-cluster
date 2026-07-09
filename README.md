@@ -8,7 +8,9 @@
 python -m business_district --config configs/shanghai.ini
 ```
 
-每次运行会在 `[output].directory` 下创建 `{edge_weight_method}_{community_algorithm}_{YYMMDDHHMMSS}` 格式的独立目录，避免覆盖历史中间文件。
+每次运行会直接在 `[output].directory` 下写入 `pair_statistics_{region}.pkl` 商户对中间文件，其中 `region` 使用 `[city].code`。
+
+本地入口会在运行结束后输出资源监测结果：`elapsed_seconds` 表示总耗时，`python_memory_current_mb` 和 `python_memory_peak_mb` 表示 Python 已跟踪内存，`python_memory_peak_phase` 表示 Python 内存峰值出现的阶段；`process_memory_current_mb` 和 `process_memory_peak_mb` 表示进程 RSS 当前值和监控打点中的最高值，`process_memory_peak_phase` 表示进程内存峰值所在阶段。生产 Linux 环境中优先使用 `process_memory_peak_mb` 和 `process_memory_peak_phase` 估算当前配置和数据量需要的内存资源；不支持进程口径的平台会显示 `unavailable`。
 
 Hive 环境可使用旧线上任务风格入口：
 
@@ -34,7 +36,7 @@ notebook 通过 `HiveTaskConfig` 显式传入配置路径、输入表、参数�
 python -m incremental_assignment.hive_task
 ```
 
-该入口先读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再按参数表中的 `start_date`、`end_date` 和 `region` 读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应日期分区，并读取 `dev_icamp.icamp_schedule_pufa_commercial_district` 的同日分区作为之前的商圈表；结果通过临时表加 `insert into table` 追加写入 `dev_icamp.icamp_merchant_cluster_algo_output`，写出过程不再读取目标表做去重。新商户不要求经纬度，入口不再读取 `configs/shanghai.ini` 或 `configs/incremental_shanghai.ini`；交易共现窗口、时间衰减和最小支持人数分别来自参数表的 `max_transaction_time_interval`、`transaction_time_interval_weight` 和 `min_transaction_number`。参数表没有提供但增量计算需要的参数仍使用代码内置默认值：30 分钟到访合并、SPPMI、互为 top-k=10、最小 z-score=0.5、锚点票权放大 1.5 倍、最高商圈分数不低于 0.55、与次高商圈分数差值不低于 0.10。增量投票按新商户连接到的存量商圈标签做加权投票；不满足归属阈值时输出 `is_abnormal=suspect_isolated` 且商圈 ID 为空。商圈表支持两种字段口径：算法结果成员表字段 `community_id`、`storename`、`is_position` 和 `is_abnormal`；或商圈档案表字段 `district_id`、`district_name` 和 `status`，其中正常状态的商圈作为可投票标签。
+该入口先读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再按参数表中的 `start_date`、`end_date` 和 `region` 读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应日期分区。输入表需要包含 `community_id` 字段：同一 `storename` 只要存在任意非空 `community_id`，即视为已在商圈中；全部为空的商户才作为本次待归属新商户。同一 `storename` 对应多个非空 `community_id` 时，该商户不参与增量投票成员计算，也不会作为新商户输出。增量入口会读取 `configs/shanghai.ini` 中 `[city].code` 和 `[output].directory` 定位初始化聚类写出的 `pair_statistics_{region}.pkl`，文件不存在时直接报错；本次增量交易先形成新的商户对统计，再合并到该中间文件并立即覆盖写回。合并时已有边 `support` 保持不变、`strength` 累加；新边 `support` 使用本次增量统计值、`strength` 累加；`merchant_visit_counts` 累加。结果通过临时表加 `insert into table` 追加写入 `dev_icamp.icamp_merchant_cluster_algo_output`，写出过程不再读取目标表做去重。新商户不要求经纬度；交易共现窗口、时间衰减和最小支持人数分别来自参数表的 `max_transaction_time_interval`、`transaction_time_interval_weight` 和 `min_transaction_number`。参数表没有提供但增量计算需要的参数仍使用代码内置默认值：30 分钟到访合并、SPPMI、互为 top-k=10、最小 z-score=0.5、最高商圈分数不低于 0.55、与次高商圈分数差值不低于 0.10。增量投票按新商户连接到的存量商圈标签做边权投票，不再做锚点票权放大；不满足归属阈值时输出 `is_abnormal=suspect_isolated` 且商圈 ID 为空。
 
 ## 商圈图生成
 
@@ -75,10 +77,10 @@ python scripts/draw_community_graphs.py merchants.csv community_graphs
 
 ## 输出
 
-主流程本地运行目录只写入商户对中间文件：
+主流程本地运行只在 `[output].directory` 下写入商户对中间文件：
 
 ```text
-pair_statistics.pkl
+pair_statistics_{region}.pkl
 ```
 
 该文件是 pickle 格式的 `PairStatistics` 对象，包含 `strengths`、`supports` 和 `merchant_visit_counts`，用于复用商户对统计结果重新执行后续聚类实验。本地运行不再写出业务 CSV 或实验记录文件。
@@ -94,9 +96,10 @@ Hive 入口输入表必须包含：
 - `region`
 - `is_interfere`
 - `is_abnormal`
+- `community_id`
 - `dt`
 
-`pos_longitude`、`pos_latitude`、`is_interfere` 和 `is_abnormal` 在输入时允许为空。经纬度只空一列、格式非法或越界时按无坐标处理；有效经纬度会参与初始化地理种子聚类，输出字段保持不变，不额外暴露内部拆分门店 ID。
+`pos_longitude`、`pos_latitude`、`is_interfere`、`is_abnormal` 和 `community_id` 在输入时允许为空。经纬度只空一列、格式非法或越界时按无坐标处理；有效经纬度会参与初始化地理种子聚类，输出字段保持不变，不额外暴露内部拆分门店 ID。
 
 Hive 参数表 `dev_icamp.icamp_merchant_cluster_algo_param` 必须包含：
 

@@ -1,12 +1,15 @@
 from datetime import datetime
 import importlib
+import pickle
 import sys
 import types
+from pathlib import Path
 
 import networkx as nx
 import pandas as pd
 import pytest
 
+from business_district.graph import PairStatistics
 from business_district.config import GraphConfig, VisitConfig
 from incremental_assignment.models import AssignmentConfig
 
@@ -159,6 +162,7 @@ def test_default_hive_task_config_uses_declared_tables(
 
     config = hive_task.build_default_hive_task_config()
 
+    assert config.config_path == Path("configs/shanghai.ini")
     assert config.source_table == "dev_icamp.icamp_merchant_cluster_algo_input"
     assert config.parameter_table == "dev_icamp.icamp_merchant_cluster_algo_param"
     assert config.community_table == "dev_icamp.icamp_schedule_pufa_commercial_district"
@@ -208,8 +212,54 @@ def test_incremental_cooccurrence_config_uses_parameter_table(
     assert hive_task.build_source_dt_list(parameters) == ["20260101", "20260102"]
 
 
+def test_merge_pair_statistics_keeps_existing_support_and_adds_visits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    base = PairStatistics(
+        strengths={("a", "b"): 2.0},
+        supports={("a", "b"): 5},
+        merchant_visit_counts={"a": 3, "b": 2},
+    )
+    incremental = PairStatistics(
+        strengths={("a", "b"): 1.5, ("b", "c"): 4.0},
+        supports={("a", "b"): 7, ("b", "c"): 2},
+        merchant_visit_counts={"b": 4, "c": 6},
+    )
+
+    result = hive_task.merge_pair_statistics(base, incremental)
+
+    assert result.strengths == {("a", "b"): 3.5, ("b", "c"): 4.0}
+    assert result.supports == {("a", "b"): 5, ("b", "c"): 2}
+    assert result.merchant_visit_counts == {"a": 3, "b": 6, "c": 6}
+
+
+def test_source_community_state_skips_multi_community_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    transactions = pd.DataFrame(
+        [
+            {hive_task.MERCHANT: "stable", "community_id": "1"},
+            {hive_task.MERCHANT: "multi", "community_id": "1"},
+            {hive_task.MERCHANT: "multi", "community_id": "2"},
+            {hive_task.MERCHANT: "new", "community_id": ""},
+        ]
+    )
+
+    state = hive_task.build_source_community_state(transactions, "source_table")
+
+    assert set(state.existing_storenames) == {"stable", "multi"}
+    assert sorted(state.members) == ["stable"]
+    assert state.members["stable"].community_id == "1"
+    assert state.skipped_multi_community_storenames == frozenset({"multi"})
+
+
 def test_taskrun_reads_source_partitions_from_parameter_table(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
     hive_task = importlib.import_module("incremental_assignment.hive_task")
@@ -236,6 +286,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "transaction_time": "20260101T100000",
                 "region": "shanghai",
                 "dt": "20260101",
+                "community_id": "D001",
             },
             {
                 "account_number": "u1",
@@ -244,6 +295,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "transaction_time": "20260101T100500",
                 "region": "shanghai",
                 "dt": "20260101",
+                "community_id": "",
             },
             {
                 "account_number": "u2",
@@ -252,6 +304,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "transaction_time": "20260103T100000",
                 "region": "shanghai",
                 "dt": "20260103",
+                "community_id": "",
             },
         ]
     )
@@ -266,7 +319,67 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
     )
     fake_sd = _FakeTaskSd(parameter_data, source_data, community_data)
     monkeypatch.setattr(hive_task, "sd", fake_sd)
+    output_directory = tmp_path / "algorithm_one_output"
+    output_directory.mkdir()
+    config_path = tmp_path / "shanghai.ini"
+    config_path.write_text(
+        f"""
+[city]
+code = "shanghai"
+name = "shanghai"
+
+[input]
+transactions_path = "data.txt"
+timestamp_formats = %Y%m%dT%H%M%S
+
+[visits]
+merge_window_minutes = 30
+maximum_daily_merchants_per_card = 30
+
+[cooccurrence]
+
+[graph]
+edge_weight_method = "transaction_count"
+context_smoothing_alpha = 0.75
+sppmi_shift = 1.0
+top_k_neighbors = 10
+minimum_z_score = 0.0
+
+[community]
+algorithm = "leiden"
+resolution = 1.0
+random_seed = 42
+maximum_cleaning_rounds = 1
+minimum_hub_degree = 10
+participation_threshold = 0.9
+
+[geo]
+cluster_radius_meters = 1000.0
+
+[anchors]
+minimum_count = 1
+maximum_count = 2
+merchants_per_anchor = 2
+maximum_participation = 0.99
+chain_visit_count_quantile = 1.0
+chain_minimum_visit_count = 100
+
+[output]
+directory = "{output_directory.as_posix()}"
+""",
+        encoding="utf-8",
+    )
+    with (output_directory / "pair_statistics_shanghai.pkl").open("wb") as file:
+        pickle.dump(
+            PairStatistics(
+                strengths={},
+                supports={},
+                merchant_visit_counts={},
+            ),
+            file,
+        )
     config = hive_task.HiveTaskConfig(
+        config_path=config_path,
         timestamp_formats=("%Y%m%dT%H%M%S",),
         visit_config=VisitConfig(
             merge_window_minutes=30,
@@ -292,11 +405,16 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
 
     assert ("param_table", ["20260101"]) in fake_sd.reads
     assert ("source_table", ["20260101", "20260102"]) in fake_sd.reads
-    assert ("community_table", ["20260101"]) in fake_sd.reads
+    assert ("community_table", ["20260101"]) not in fake_sd.reads
     assert summary.source_rows == 2
+    assert summary.community_rows == 1
     assert summary.inserted_rows == 1
     assert fake_sd.tables[0].loc[0, "storename"] == "new-shop"
     assert fake_sd.tables[0].loc[0, "community_id"] == "D001"
+    with (output_directory / "pair_statistics_shanghai.pkl").open("rb") as file:
+        statistics = pickle.load(file)
+    assert statistics.supports[("new-shop", "old-shop")] == 1
+    assert statistics.merchant_visit_counts == {"new-shop": 1, "old-shop": 1}
 
 
 def test_build_community_members_accepts_district_table(
@@ -370,6 +488,7 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
                 "transaction_time": "20260102T100000",
                 "region": "shanghai",
                 "dt": "20260102",
+                "community_id": "",
             },
             {
                 "account_number": "u1",
@@ -378,6 +497,7 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
                 "transaction_time": "20260101T100000",
                 "region": "shanghai",
                 "dt": "20260101",
+                "community_id": "",
             },
             {
                 "account_number": "u2",
@@ -386,6 +506,7 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
                 "transaction_time": "20260102T110000",
                 "region": "shanghai",
                 "dt": "20260102",
+                "community_id": "",
             },
         ]
     )

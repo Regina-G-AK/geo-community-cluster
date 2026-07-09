@@ -4,6 +4,7 @@ import datetime
 import time
 import tracemalloc
 from dataclasses import dataclass
+from pathlib import Path
 from types import ModuleType
 
 import networkx as nx
@@ -15,9 +16,18 @@ from spdbccc_data import loging as logrecord
 from spdbccc_data import mountCheck
 from spdbccc_data import task as taskfinish
 
-from business_district.config import CooccurrenceConfig, GraphConfig, VisitConfig
+from business_district.config import (
+    CooccurrenceConfig,
+    GraphConfig,
+    VisitConfig,
+    load_config_with_runtime_parameters,
+)
 from business_district.errors import TransactionDataError
-from business_district.graph import build_sparse_graph, build_pair_statistics
+from business_district.graph import (
+    PairStatistics,
+    build_pair_statistics,
+    build_sparse_graph,
+)
 from business_district.hive_task import (
     HiveAlgorithmParameter,
     PARAMETER_TABLE,
@@ -25,6 +35,11 @@ from business_district.hive_task import (
     build_source_dt_list,
     filter_source_data_by_parameters,
     load_hive_algorithm_parameters,
+)
+from business_district.intermediate import (
+    build_pair_statistics_path,
+    read_pair_statistics,
+    write_pair_statistics,
 )
 from business_district.transactions import (
     CARD,
@@ -45,7 +60,9 @@ SOURCE_TABLE = "dev_icamp.icamp_merchant_cluster_algo_input"
 COMMUNITY_TABLE = "dev_icamp.icamp_schedule_pufa_commercial_district"
 TARGET_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output"
 TARGET_TEMP_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output_incremental_tmp"
+DEFAULT_CONFIG_PATH = Path("configs/shanghai.ini")
 DEFAULT_DT_EXPRESSION = "T-1"
+RAW_COMMUNITY_ID = "community_id"
 DEFAULT_TIMESTAMP_FORMATS = (
     "%Y%m%dT%H%M%S",
     "%Y%m%d%H%M%S",
@@ -108,6 +125,7 @@ SOURCE_REQUIRED_COLUMNS = {
     RAW_TIMESTAMP,
     REGION,
     DT,
+    RAW_COMMUNITY_ID,
 }
 MEMBER_COMMUNITY_REQUIRED_COLUMNS = {
     "storename",
@@ -143,6 +161,13 @@ class CommunityMember:
 
 
 @dataclass(frozen=True)
+class SourceCommunityState:
+    existing_storenames: frozenset[str]
+    members: dict[str, CommunityMember]
+    skipped_multi_community_storenames: frozenset[str]
+
+
+@dataclass(frozen=True)
 class HiveCandidateMerchant:
     storename: str
     region: str
@@ -151,6 +176,7 @@ class HiveCandidateMerchant:
 
 @dataclass(frozen=True)
 class HiveTaskConfig:
+    config_path: Path
     timestamp_formats: tuple[str, ...]
     visit_config: VisitConfig
     graph_config: GraphConfig
@@ -175,6 +201,7 @@ class HiveTaskSummary:
 
 def build_default_hive_task_config() -> HiveTaskConfig:
     return HiveTaskConfig(
+        config_path=DEFAULT_CONFIG_PATH,
         timestamp_formats=DEFAULT_TIMESTAMP_FORMATS,
         visit_config=DEFAULT_VISIT_CONFIG,
         graph_config=DEFAULT_GRAPH_CONFIG,
@@ -275,7 +302,15 @@ def load_incremental_transactions(
 ) -> pd.DataFrame:
     source = _require_columns(source_data, SOURCE_REQUIRED_COLUMNS, source_table)
     selected = source[
-        [RAW_CARD, FLOW_NUMBER, RAW_MERCHANT, RAW_TIMESTAMP, REGION, DT]
+        [
+            RAW_CARD,
+            FLOW_NUMBER,
+            RAW_MERCHANT,
+            RAW_TIMESTAMP,
+            REGION,
+            DT,
+            RAW_COMMUNITY_ID,
+        ]
     ].copy()
     selected[RAW_CARD] = selected[RAW_CARD].astype("string").str.strip()
     selected[FLOW_NUMBER] = selected[FLOW_NUMBER].astype("string").str.strip()
@@ -283,6 +318,7 @@ def load_incremental_transactions(
     selected[RAW_TIMESTAMP] = selected[RAW_TIMESTAMP].astype("string").str.strip()
     selected[REGION] = selected[REGION].astype("string").str.strip()
     selected[DT] = selected[DT].astype("string").str.strip()
+    selected[RAW_COMMUNITY_ID] = selected[RAW_COMMUNITY_ID].astype("string").str.strip()
     invalid = (
         selected[RAW_CARD].isna()
         | selected[RAW_CARD].eq("")
@@ -313,9 +349,9 @@ def load_incremental_transactions(
             RAW_MERCHANT: MERCHANT,
         }
     )
-    return result[[CARD, FLOW_NUMBER, MERCHANT, TIMESTAMP, REGION, DT]].sort_values(
-        [CARD, TIMESTAMP, MERCHANT],
-    ).reset_index(drop=True)
+    return result[
+        [CARD, FLOW_NUMBER, MERCHANT, TIMESTAMP, REGION, DT, RAW_COMMUNITY_ID]
+    ].sort_values([CARD, TIMESTAMP, MERCHANT]).reset_index(drop=True)
 
 
 def load_source_candidates(
@@ -351,6 +387,82 @@ def build_incremental_cooccurrence_config(
         window_minutes=runtime_config.window_minutes,
         decay_tau_minutes=runtime_config.decay_tau_minutes,
         minimum_unique_users=runtime_config.minimum_unique_users,
+    )
+
+
+def merge_pair_statistics(
+    base_statistics: PairStatistics,
+    incremental_statistics: PairStatistics,
+) -> PairStatistics:
+    strengths: dict[tuple[str, str], float] = dict(base_statistics.strengths)
+    supports: dict[tuple[str, str], int] = dict(base_statistics.supports)
+    merchant_visit_counts: dict[str, int] = dict(base_statistics.merchant_visit_counts)
+
+    for pair, strength in incremental_statistics.strengths.items():
+        if pair in strengths:
+            if pair not in supports:
+                raise TransactionDataError(
+                    f"商户对中间文件缺少 support: pair={pair}"
+                )
+            strengths[pair] = float(strengths[pair]) + float(strength)
+        else:
+            if pair not in incremental_statistics.supports:
+                raise TransactionDataError(
+                    f"增量商户对统计缺少 support: pair={pair}"
+                )
+            strengths[pair] = float(strength)
+            supports[pair] = int(incremental_statistics.supports[pair])
+
+    for merchant_id, visit_count in incremental_statistics.merchant_visit_counts.items():
+        merchant_visit_counts[merchant_id] = (
+            int(merchant_visit_counts.get(merchant_id, 0)) + int(visit_count)
+        )
+
+    return PairStatistics(
+        strengths=strengths,
+        supports=supports,
+        merchant_visit_counts=merchant_visit_counts,
+    )
+
+
+def build_source_community_state(
+    transactions: pd.DataFrame,
+    source_table: str,
+) -> SourceCommunityState:
+    source = _require_columns(transactions, {MERCHANT, RAW_COMMUNITY_ID}, source_table)
+    community_ids_by_storename: dict[str, set[str]] = {}
+    for row in source[[MERCHANT, RAW_COMMUNITY_ID]].to_dict("records"):
+        storename = _clean_text(row[MERCHANT])
+        community_id = _format_hive_id(row[RAW_COMMUNITY_ID])
+        if not storename or not community_id:
+            continue
+        if storename not in community_ids_by_storename:
+            community_ids_by_storename[storename] = set()
+        community_ids_by_storename[storename].add(community_id)
+
+    members: dict[str, CommunityMember] = {}
+    skipped_storenames: set[str] = set()
+    for storename, community_ids in community_ids_by_storename.items():
+        if len(community_ids) != 1:
+            skipped_storenames.add(storename)
+            continue
+        community_id = sorted(community_ids)[0]
+        members[storename] = CommunityMember(
+            storename=storename,
+            community_id=community_id,
+            is_anchor=False,
+        )
+
+    if not members:
+        raise TransactionDataError(
+            "Hive 输入表没有可用存量商圈成员: "
+            f"table={source_table}, community_id_column={RAW_COMMUNITY_ID}"
+        )
+
+    return SourceCommunityState(
+        existing_storenames=frozenset(community_ids_by_storename),
+        members=members,
+        skipped_multi_community_storenames=frozenset(skipped_storenames),
     )
 
 
@@ -474,11 +586,7 @@ def _candidate_scores(
         edge_weight = float(graph[candidate.storename][neighbor].get("weight", 0.0))
         if edge_weight <= 0.0:
             continue
-        vote_weight = (
-            edge_weight * assignment_config.anchor_vote_weight
-            if member.is_anchor
-            else edge_weight
-        )
+        vote_weight = edge_weight
         neighbors.append((str(neighbor), vote_weight))
     selected = sorted(neighbors, key=lambda item: (-item[1], item[0]))[
         : assignment_config.top_k_neighbors
@@ -596,9 +704,18 @@ class TaskMain:
                 parameter_data,
                 self.task_config.parameter_table,
             )
-            cooccurrence_config = build_incremental_cooccurrence_config(
+            runtime_config = build_runtime_config(
                 parameters,
                 self.task_config.parameter_table,
+            )
+            algorithm_config = load_config_with_runtime_parameters(
+                self.task_config.config_path,
+                runtime_config,
+            )
+            cooccurrence_config = CooccurrenceConfig(
+                window_minutes=runtime_config.window_minutes,
+                decay_tau_minutes=runtime_config.decay_tau_minutes,
+                minimum_unique_users=runtime_config.minimum_unique_users,
             )
             source_dt_list = build_source_dt_list(parameters)
             logrecord.log_data(
@@ -606,10 +723,6 @@ class TaskMain:
                 f"source_dt={source_dt_list}"
             )
             source_data = sd.read_table(self.task_config.source_table, dt=source_dt_list)
-            community_data = sd.read_table(
-                self.task_config.community_table,
-                dt=parameter_dt_list,
-            )
             filtered_source_data = filter_source_data_by_parameters(
                 source_data,
                 parameters,
@@ -623,24 +736,34 @@ class TaskMain:
                 self.task_config.source_table,
             )
             visits = merge_visits(transactions, self.task_config.visit_config)
+            incremental_statistics = build_pair_statistics(visits, cooccurrence_config)
+            pair_statistics_path = build_pair_statistics_path(
+                algorithm_config.output.directory,
+                algorithm_config.city.code,
+            )
+            statistics = merge_pair_statistics(
+                read_pair_statistics(pair_statistics_path),
+                incremental_statistics,
+            )
+            write_pair_statistics(statistics, pair_statistics_path)
             graph = build_sparse_graph(
-                build_pair_statistics(visits, cooccurrence_config),
+                statistics,
                 cooccurrence_config,
                 self.task_config.graph_config,
             )
-            members = build_community_members(
-                community_data,
-                self.task_config.community_table,
+            source_state = build_source_community_state(
+                transactions,
+                self.task_config.source_table,
             )
             candidates = load_source_candidates(
                 transactions,
-                _existing_storenames(community_data),
+                set(source_state.existing_storenames),
                 self.dt_var,
             )
             target_output = build_incremental_output(
                 candidates,
                 graph,
-                members,
+                source_state.members,
                 self.task_config.assignment_config,
                 datetime.datetime.now().astimezone(),
             )
@@ -652,12 +775,14 @@ class TaskMain:
             )
             logrecord.log_data(
                 f"incremental taskrun seconds={time.time() - total_start:.2f}, "
-                f"candidate_count={len(candidates)}, inserted_rows={len(target_output)}"
+                f"candidate_count={len(candidates)}, inserted_rows={len(target_output)}, "
+                f"skipped_multi_community_count="
+                f"{len(source_state.skipped_multi_community_storenames)}"
             )
             return HiveTaskSummary(
                 dt=self.dt_var,
                 source_rows=len(filtered_source_data),
-                community_rows=len(community_data),
+                community_rows=len(source_state.members),
                 candidate_count=len(candidates),
                 inserted_rows=len(target_output),
                 target_table=self.task_config.target_table,
