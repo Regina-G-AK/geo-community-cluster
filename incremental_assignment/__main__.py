@@ -1,6 +1,5 @@
-from incremental_assignment.cli import main
+from incremental_assignment.hive_task import main
 
 
 if __name__ == "__main__":
     main()
-

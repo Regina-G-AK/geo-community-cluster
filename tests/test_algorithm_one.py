@@ -547,8 +547,8 @@ def test_business_results_use_configured_minimum_community_size() -> None:
                 "is_multi_community_member": 0,
                 "connected_community_count": 1,
                 "chain_visit_count_threshold": 100,
-                "is_chain_like": 0,
-                "chain_reason": "",
+                "is_chain_like": 1,
+                "chain_reason": "visit_count",
             },
             {
                 "merchant_id": "c",
@@ -583,7 +583,10 @@ def test_business_results_use_configured_minimum_community_size() -> None:
 
     valid_rows = result.loc[result["storename"].isin(["a", "b"])]
     invalid_row = result.loc[result["storename"].eq("c")].iloc[0]
-    assert set(valid_rows["status"]) == {"normal"}
+    merchant_a = result.loc[result["storename"].eq("a")].iloc[0]
+    merchant_b = result.loc[result["storename"].eq("b")].iloc[0]
+    assert merchant_a["status"] == "normal"
+    assert merchant_b["status"] == "suspect_chain_store"
     assert set(valid_rows["community_id"].astype(int)) == {0}
     assert invalid_row["status"] == "suspect_isolated"
     assert invalid_row["community_id"] == ""
@@ -859,7 +862,7 @@ directory = "{output_path.as_posix()}"
     assert set(result["storename"]) == {"a", "b", "c", "d"}
     assert set(result["status"]) == {"normal", "suspect_isolated"}
     assert "suspect_lost" not in set(result["status"])
-    assert set(result["is_interfere"]) == {0}
+    assert set(result["is_interfere"]) == {"N"}
     assert result["update_time"].str.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}").all()
     merchant_a = result.loc[result["storename"].eq("a")].iloc[0]
     merchant_d = result.loc[result["storename"].eq("d")].iloc[0]

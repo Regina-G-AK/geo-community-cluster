@@ -82,12 +82,24 @@ def test_hive_target_output_formats_status_as_dict_code(
                 "is_position": 0,
                 "dt": "20260101",
             },
+            {
+                "storename": "c",
+                "community_id": 2,
+                "previous_community_id": "",
+                "region": "shanghai",
+                "is_interfere": 0,
+                "update_time": "2026-01-01 10:00:00",
+                "status": "suspect_chain_store",
+                "is_position": 0,
+                "dt": "20260101",
+            },
         ]
     )
 
     output = hive_task.build_hive_target_output(business_results)
 
-    assert output["is_abnormal"].tolist() == ["1", "2"]
+    assert output["is_abnormal"].tolist() == ["1", "2", "6"]
+    assert output["is_interfere"].tolist() == ["N", "N", "N"]
 
 
 def test_status_name_formats_as_dict_code() -> None:

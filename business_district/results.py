@@ -455,6 +455,11 @@ def build_business_results(
         raw_community_id = getattr(row, "community_id")
         raw_primary_community_id = getattr(row, "primary_community_id")
         raw_status = getattr(row, "merchant_status")
+        is_chain_like = (
+            int(getattr(row, "is_chain_like"))
+            if pd.notna(getattr(row, "is_chain_like"))
+            else 0
+        )
         community_id = (
             int(raw_community_id)
             if pd.notna(raw_community_id)
@@ -466,6 +471,8 @@ def build_business_results(
         if pd.notna(raw_status) and str(raw_status) == "suspect_online":
             status = "suspect_online"
             community_id = ""
+        elif community_id != "" and is_chain_like == 1:
+            status = "suspect_chain_store"
         primary_community_id = (
             int(raw_primary_community_id)
             if community_id != ""
@@ -480,7 +487,7 @@ def build_business_results(
                 "community_id": community_id,
                 "previous_community_id": "",
                 "region": str(getattr(row, REGION)),
-                "is_interfere": 0,
+                "is_interfere": "N",
                 "update_time": timestamp,
                 "status": status,
                 "is_position": (
@@ -507,11 +514,7 @@ def build_business_results(
                     and pd.notna(getattr(row, "is_multi_community_member"))
                     else 0
                 ),
-                "is_chain_like": (
-                    int(getattr(row, "is_chain_like"))
-                    if pd.notna(getattr(row, "is_chain_like"))
-                    else 0
-                ),
+                "is_chain_like": is_chain_like,
                 "chain_reason": (
                     str(getattr(row, "chain_reason"))
                     if pd.notna(getattr(row, "chain_reason"))

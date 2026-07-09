@@ -28,6 +28,7 @@ from business_district.graph import (
     build_pair_statistics,
     build_sparse_graph,
 )
+from business_district.geo import CoordinatePoint, haversine_distance_meters
 from business_district.hive_task import (
     HiveAlgorithmParameter,
     PARAMETER_TABLE,
@@ -46,14 +47,20 @@ from business_district.transactions import (
     CARD,
     DT,
     FLOW_NUMBER,
+    LATITUDE,
+    LONGITUDE,
     MERCHANT,
     RAW_CARD,
+    RAW_INTERFERE,
+    RAW_LATITUDE,
+    RAW_LONGITUDE,
     RAW_MERCHANT,
     RAW_TIMESTAMP,
     REGION,
     TIMESTAMP,
     keep_first_hive_flow_number_rows,
     merge_visits,
+    _parse_coordinates,
 )
 from incremental_assignment.models import AssignmentConfig
 
@@ -82,16 +89,11 @@ DEFAULT_GRAPH_CONFIG = GraphConfig(
     minimum_z_score=0.5,
 )
 DEFAULT_ASSIGNMENT_CONFIG = AssignmentConfig(
-    min_observation_days=28,
-    min_unique_users=5,
     top_k_neighbors=15,
-    anchor_vote_weight=1.5,
     theta=0.55,
     delta=0.10,
     graph_weight=0.6,
     geo_weight=0.3,
-    customer_weight=0.1,
-    minimum_sigma_meters=200.0,
     community_assignment_distance_meters=3000.0,
     city_maximum_distance_meters=50000.0,
 )
@@ -124,7 +126,10 @@ SOURCE_REQUIRED_COLUMNS = {
     FLOW_NUMBER,
     RAW_MERCHANT,
     RAW_TIMESTAMP,
+    RAW_LONGITUDE,
+    RAW_LATITUDE,
     REGION,
+    RAW_INTERFERE,
     DT,
     RAW_COMMUNITY_ID,
 }
@@ -308,7 +313,10 @@ def load_incremental_transactions(
             FLOW_NUMBER,
             RAW_MERCHANT,
             RAW_TIMESTAMP,
+            RAW_LONGITUDE,
+            RAW_LATITUDE,
             REGION,
+            RAW_INTERFERE,
             DT,
             RAW_COMMUNITY_ID,
         ]
@@ -317,7 +325,10 @@ def load_incremental_transactions(
     selected[FLOW_NUMBER] = selected[FLOW_NUMBER].astype("string").str.strip()
     selected[RAW_MERCHANT] = selected[RAW_MERCHANT].astype("string").str.strip()
     selected[RAW_TIMESTAMP] = selected[RAW_TIMESTAMP].astype("string").str.strip()
+    selected[RAW_LONGITUDE] = selected[RAW_LONGITUDE].astype("string").str.strip()
+    selected[RAW_LATITUDE] = selected[RAW_LATITUDE].astype("string").str.strip()
     selected[REGION] = selected[REGION].astype("string").str.strip()
+    selected[RAW_INTERFERE] = selected[RAW_INTERFERE].astype("string").str.strip()
     selected[DT] = selected[DT].astype("string").str.strip()
     selected[RAW_COMMUNITY_ID] = selected[RAW_COMMUNITY_ID].astype("string").str.strip()
     invalid = (
@@ -338,12 +349,24 @@ def load_incremental_transactions(
             "Hive 输入表包含空卡号、流水号、商户名、地区或日期: "
             f"table={source_table}, invalid_rows={int(invalid.sum())}, examples={examples}"
         )
+    interfere_values = selected[RAW_INTERFERE].fillna("").str.upper()
+    interfered_storenames = set(
+        selected.loc[
+            interfere_values.eq("Y"),
+            RAW_MERCHANT,
+        ].dropna()
+    )
+    if interfered_storenames:
+        selected = selected.loc[
+            ~selected[RAW_MERCHANT].isin(interfered_storenames)
+        ].copy()
     selected = keep_first_hive_flow_number_rows(selected)
     selected[TIMESTAMP] = _parse_transaction_time(
         selected[RAW_TIMESTAMP],
         timestamp_formats,
         source_table,
     )
+    selected = _parse_coordinates(selected)
     result = selected.rename(
         columns={
             RAW_CARD: CARD,
@@ -351,7 +374,17 @@ def load_incremental_transactions(
         }
     )
     return result[
-        [CARD, FLOW_NUMBER, MERCHANT, TIMESTAMP, REGION, DT, RAW_COMMUNITY_ID]
+        [
+            CARD,
+            FLOW_NUMBER,
+            MERCHANT,
+            TIMESTAMP,
+            LONGITUDE,
+            LATITUDE,
+            REGION,
+            DT,
+            RAW_COMMUNITY_ID,
+        ]
     ].sort_values([CARD, TIMESTAMP, MERCHANT]).reset_index(drop=True)
 
 
@@ -570,7 +603,35 @@ def _community_sort_key(community_id: str) -> tuple[int, str]:
         return 0, community_id
 
 
-def _candidate_scores(
+def build_latest_merchant_coordinates(
+    transactions: pd.DataFrame,
+) -> dict[str, CoordinatePoint]:
+    source = _require_columns(
+        transactions,
+        {MERCHANT, TIMESTAMP, LONGITUDE, LATITUDE},
+        "transactions",
+    )
+    selected = source.loc[
+        source[LONGITUDE].notna() & source[LATITUDE].notna()
+    ].copy()
+    if selected.empty:
+        return {}
+    latest = (
+        selected.sort_values([MERCHANT, TIMESTAMP])
+        .drop_duplicates(subset=[MERCHANT], keep="last")
+    )
+    return {
+        _clean_text(row[MERCHANT]): CoordinatePoint(
+            item_id=_clean_text(row[MERCHANT]),
+            longitude=float(row[LONGITUDE]),
+            latitude=float(row[LATITUDE]),
+        )
+        for row in latest.to_dict("records")
+        if _clean_text(row[MERCHANT])
+    }
+
+
+def _graph_candidate_scores(
     candidate: HiveCandidateMerchant,
     graph: nx.Graph,
     members: dict[str, CommunityMember],
@@ -604,6 +665,138 @@ def _candidate_scores(
     }
 
 
+def _geographic_candidate_scores(
+    candidate: HiveCandidateMerchant,
+    candidate_coordinates: dict[str, CoordinatePoint],
+    member_coordinates: dict[str, CoordinatePoint],
+    members: dict[str, CommunityMember],
+    assignment_config: AssignmentConfig,
+) -> dict[str, float]:
+    if assignment_config.community_assignment_distance_meters <= 0.0:
+        raise TransactionDataError(
+            "增量归属地理距离阈值必须大于 0: "
+            f"community_assignment_distance_meters="
+            f"{assignment_config.community_assignment_distance_meters}"
+        )
+    candidate_point = candidate_coordinates.get(candidate.storename)
+    if candidate_point is None:
+        return {}
+    weighted_votes: dict[str, float] = {}
+    for member_name, member in members.items():
+        member_point = member_coordinates.get(member_name)
+        if member_point is None:
+            continue
+        distance = haversine_distance_meters(
+            candidate_point.longitude,
+            candidate_point.latitude,
+            member_point.longitude,
+            member_point.latitude,
+        )
+        if distance > assignment_config.community_assignment_distance_meters:
+            continue
+        vote_weight = 1.0 - (
+            distance / assignment_config.community_assignment_distance_meters
+        )
+        if vote_weight <= 0.0:
+            continue
+        weighted_votes[member.community_id] = (
+            weighted_votes.get(member.community_id, 0.0) + vote_weight
+        )
+    total_weight = sum(weighted_votes.values())
+    if total_weight <= 0.0:
+        return {}
+    return {
+        community_id: weight / total_weight
+        for community_id, weight in weighted_votes.items()
+    }
+
+
+def _nearest_member_distance(
+    candidate: HiveCandidateMerchant,
+    candidate_coordinates: dict[str, CoordinatePoint],
+    member_coordinates: dict[str, CoordinatePoint],
+    members: dict[str, CommunityMember],
+) -> float | None:
+    candidate_point = candidate_coordinates.get(candidate.storename)
+    if candidate_point is None:
+        return None
+    distances = [
+        haversine_distance_meters(
+            candidate_point.longitude,
+            candidate_point.latitude,
+            member_point.longitude,
+            member_point.latitude,
+        )
+        for member_name in members
+        for member_point in [member_coordinates.get(member_name)]
+        if member_point is not None
+    ]
+    if not distances:
+        return None
+    return min(distances)
+
+
+def _geographic_status_override(
+    candidate: HiveCandidateMerchant,
+    candidate_coordinates: dict[str, CoordinatePoint],
+    member_coordinates: dict[str, CoordinatePoint],
+    members: dict[str, CommunityMember],
+    assignment_config: AssignmentConfig,
+) -> str | None:
+    if assignment_config.city_maximum_distance_meters <= (
+        assignment_config.community_assignment_distance_meters
+    ):
+        raise TransactionDataError(
+            "增量归属跨区域阈值必须大于商圈地理匹配阈值: "
+            f"city_maximum_distance_meters="
+            f"{assignment_config.city_maximum_distance_meters}, "
+            f"community_assignment_distance_meters="
+            f"{assignment_config.community_assignment_distance_meters}"
+        )
+    nearest_distance = _nearest_member_distance(
+        candidate,
+        candidate_coordinates,
+        member_coordinates,
+        members,
+    )
+    if nearest_distance is None:
+        return None
+    if nearest_distance > assignment_config.city_maximum_distance_meters:
+        return SUSPECT_CROSS_REGION_STATUS
+    if nearest_distance > assignment_config.community_assignment_distance_meters:
+        return SUSPECT_ISOLATED_STATUS
+    return None
+
+
+def _merge_candidate_scores(
+    graph_scores: dict[str, float],
+    geographic_scores: dict[str, float],
+    assignment_config: AssignmentConfig,
+) -> dict[str, float]:
+    if not graph_scores and not geographic_scores:
+        return {}
+    graph_weight = assignment_config.graph_weight if graph_scores else 0.0
+    geographic_weight = assignment_config.geo_weight if geographic_scores else 0.0
+    total_weight = graph_weight + geographic_weight
+    if total_weight <= 0.0:
+        raise TransactionDataError(
+            "增量归属可用分数权重之和必须大于 0: "
+            f"graph_available={bool(graph_scores)}, "
+            f"geographic_available={bool(geographic_scores)}, "
+            f"graph_weight={assignment_config.graph_weight}, "
+            f"geo_weight={assignment_config.geo_weight}"
+        )
+    community_ids = set(graph_scores).union(geographic_scores)
+    return {
+        community_id: (
+            graph_scores.get(community_id, 0.0) * graph_weight
+            + geographic_scores.get(community_id, 0.0) * geographic_weight
+        )
+        / total_weight
+        for community_id in community_ids
+    }
+
+
 def _top_two(scores: dict[str, float]) -> tuple[str, str | None, float, float]:
     ordered = sorted(
         scores.items(),
@@ -620,13 +813,54 @@ def build_incremental_output(
     candidates: list[HiveCandidateMerchant],
     graph: nx.Graph,
     members: dict[str, CommunityMember],
+    candidate_coordinates: dict[str, CoordinatePoint],
+    member_coordinates: dict[str, CoordinatePoint],
     assignment_config: AssignmentConfig,
     update_time: datetime.datetime,
 ) -> pd.DataFrame:
     timestamp = update_time.strftime("%Y-%m-%d %H:%M:%S")
     rows: list[dict[str, str | int]] = []
     for candidate in candidates:
-        scores = _candidate_scores(candidate, graph, members, assignment_config)
+        status_override = _geographic_status_override(
+            candidate,
+            candidate_coordinates,
+            member_coordinates,
+            members,
+            assignment_config,
+        )
+        if status_override is not None:
+            rows.append(
+                {
+                    "storename": candidate.storename,
+                    "community_id": "",
+                    "previous_community_id": "",
+                    "region": candidate.region,
+                    "is_interfere": "N",
+                    "update_time": timestamp,
+                    "is_abnormal": format_status_code(status_override),
+                    "is_position": 0,
+                    "dt": candidate.dt,
+                }
+            )
+            continue
+        graph_scores = _graph_candidate_scores(
+            candidate,
+            graph,
+            members,
+            assignment_config,
+        )
+        geographic_scores = _geographic_candidate_scores(
+            candidate,
+            candidate_coordinates,
+            member_coordinates,
+            members,
+            assignment_config,
+        )
+        scores = _merge_candidate_scores(
+            graph_scores,
+            geographic_scores,
+            assignment_config,
+        )
         if scores:
             top_id, _, top_score, second_score = _top_two(scores)
             if (
@@ -647,7 +881,7 @@ def build_incremental_output(
                 "community_id": assigned_community_id,
                 "previous_community_id": "",
                 "region": candidate.region,
-                "is_interfere": 0,
+                "is_interfere": "N",
                 "update_time": timestamp,
                 "is_abnormal": format_status_code(status),
                 "is_position": 0,
@@ -761,10 +995,23 @@ class TaskMain:
                 set(source_state.existing_storenames),
                 self.dt_var,
             )
+            coordinates = build_latest_merchant_coordinates(transactions)
+            candidate_coordinates = {
+                candidate.storename: coordinates[candidate.storename]
+                for candidate in candidates
+                if candidate.storename in coordinates
+            }
+            member_coordinates = {
+                storename: coordinates[storename]
+                for storename in source_state.members
+                if storename in coordinates
+            }
             target_output = build_incremental_output(
                 candidates,
                 graph,
                 source_state.members,
+                candidate_coordinates,
+                member_coordinates,
                 self.task_config.assignment_config,
                 datetime.datetime.now().astimezone(),
             )

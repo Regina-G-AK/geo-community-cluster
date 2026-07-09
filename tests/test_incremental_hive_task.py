@@ -87,16 +87,11 @@ def _config(
     city_maximum_distance_meters: float,
 ) -> AssignmentConfig:
     return AssignmentConfig(
-        min_observation_days=28,
-        min_unique_users=5,
         top_k_neighbors=15,
-        anchor_vote_weight=1.5,
         theta=0.55,
         delta=0.10,
         graph_weight=0.6,
         geo_weight=0.3,
-        customer_weight=0.1,
-        minimum_sigma_meters=100.0,
         community_assignment_distance_meters=community_assignment_distance_meters,
         city_maximum_distance_meters=city_maximum_distance_meters,
     )
@@ -144,6 +139,8 @@ def test_incremental_output_uses_graph_vote_and_marks_unassigned(
         candidates,
         graph,
         members,
+        {},
+        {},
         _config(3000.0, 50000.0),
         datetime.fromisoformat("2026-01-01T10:00:00"),
     )
@@ -152,6 +149,157 @@ def test_incremental_output_uses_graph_vote_and_marks_unassigned(
     assert output.loc[0, "is_abnormal"] == "1"
     assert output.loc[1, "community_id"] == ""
     assert output.loc[1, "is_abnormal"] == "3"
+
+
+def test_incremental_output_uses_geographic_vote_without_graph_edges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    members = {
+        "near-member": hive_task.CommunityMember(
+            storename="near-member",
+            community_id="8",
+            is_anchor=False,
+        ),
+        "far-member": hive_task.CommunityMember(
+            storename="far-member",
+            community_id="9",
+            is_anchor=False,
+        ),
+    }
+    candidate_coordinates = {
+        "new-shop": hive_task.CoordinatePoint(
+            item_id="new-shop",
+            longitude=121.0001,
+            latitude=31.0001,
+        )
+    }
+    member_coordinates = {
+        "near-member": hive_task.CoordinatePoint(
+            item_id="near-member",
+            longitude=121.0002,
+            latitude=31.0002,
+        ),
+        "far-member": hive_task.CoordinatePoint(
+            item_id="far-member",
+            longitude=122.0,
+            latitude=32.0,
+        ),
+    }
+
+    output = hive_task.build_incremental_output(
+        [
+            hive_task.HiveCandidateMerchant(
+                storename="new-shop",
+                region="shanghai",
+                dt="20260101",
+            )
+        ],
+        nx.Graph(),
+        members,
+        candidate_coordinates,
+        member_coordinates,
+        _config(3000.0, 50000.0),
+        datetime.fromisoformat("2026-01-01T10:00:00"),
+    )
+
+    assert output.loc[0, "community_id"] == "8"
+    assert output.loc[0, "is_abnormal"] == "1"
+
+
+def test_coordinate_candidate_far_from_city_skips_graph_vote_as_cross_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    members = {
+        "member-a": hive_task.CommunityMember(
+            storename="member-a",
+            community_id="1",
+            is_anchor=False,
+        )
+    }
+    graph = nx.Graph()
+    graph.add_edge("new-shop", "member-a", weight=10.0)
+
+    output = hive_task.build_incremental_output(
+        [
+            hive_task.HiveCandidateMerchant(
+                storename="new-shop",
+                region="shanghai",
+                dt="20260101",
+            )
+        ],
+        graph,
+        members,
+        {
+            "new-shop": hive_task.CoordinatePoint(
+                item_id="new-shop",
+                longitude=122.0,
+                latitude=32.0,
+            )
+        },
+        {
+            "member-a": hive_task.CoordinatePoint(
+                item_id="member-a",
+                longitude=121.0,
+                latitude=31.0,
+            )
+        },
+        _config(3000.0, 50000.0),
+        datetime.fromisoformat("2026-01-01T10:00:00"),
+    )
+
+    assert output.loc[0, "community_id"] == ""
+    assert output.loc[0, "is_abnormal"] == "5"
+
+
+def test_coordinate_candidate_outside_community_distance_skips_graph_vote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    members = {
+        "member-a": hive_task.CommunityMember(
+            storename="member-a",
+            community_id="1",
+            is_anchor=False,
+        )
+    }
+    graph = nx.Graph()
+    graph.add_edge("new-shop", "member-a", weight=10.0)
+
+    output = hive_task.build_incremental_output(
+        [
+            hive_task.HiveCandidateMerchant(
+                storename="new-shop",
+                region="shanghai",
+                dt="20260101",
+            )
+        ],
+        graph,
+        members,
+        {
+            "new-shop": hive_task.CoordinatePoint(
+                item_id="new-shop",
+                longitude=121.05,
+                latitude=31.0,
+            )
+        },
+        {
+            "member-a": hive_task.CoordinatePoint(
+                item_id="member-a",
+                longitude=121.0,
+                latitude=31.0,
+            )
+        },
+        _config(3000.0, 50000.0),
+        datetime.fromisoformat("2026-01-01T10:00:00"),
+    )
+
+    assert output.loc[0, "community_id"] == ""
+    assert output.loc[0, "is_abnormal"] == "3"
 
 
 def test_default_hive_task_config_uses_declared_tables(
@@ -284,7 +432,10 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "global_flow_number": "f1",
                 "storename": "old-shop",
                 "transaction_time": "20260101T100000",
+                "pos_longitude": "121.0",
+                "pos_latitude": "31.0",
                 "region": "shanghai",
+                "is_interfere": "N",
                 "dt": "20260101",
                 "community_id": "D001",
             },
@@ -293,7 +444,10 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "global_flow_number": "f2",
                 "storename": "new-shop",
                 "transaction_time": "20260101T100500",
+                "pos_longitude": "121.0001",
+                "pos_latitude": "31.0001",
                 "region": "shanghai",
+                "is_interfere": "N",
                 "dt": "20260101",
                 "community_id": "",
             },
@@ -302,7 +456,10 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "global_flow_number": "f3",
                 "storename": "other-shop",
                 "transaction_time": "20260103T100000",
+                "pos_longitude": "121.2",
+                "pos_latitude": "31.2",
                 "region": "shanghai",
+                "is_interfere": "N",
                 "dt": "20260103",
                 "community_id": "",
             },
@@ -457,7 +614,7 @@ def test_insert_new_target_rows_uses_insert_into(
                 "community_id": "1",
                 "previous_community_id": "",
                 "region": "shanghai",
-                "is_interfere": 0,
+                "is_interfere": "N",
                 "update_time": "2026-01-01 10:00:00",
                 "is_abnormal": "1",
                 "is_position": 0,
@@ -486,7 +643,10 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
                 "global_flow_number": "f1",
                 "storename": "late",
                 "transaction_time": "20260102T100000",
+                "pos_longitude": "121.0",
+                "pos_latitude": "31.0",
                 "region": "shanghai",
+                "is_interfere": "N",
                 "dt": "20260102",
                 "community_id": "",
             },
@@ -495,7 +655,10 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
                 "global_flow_number": "f1",
                 "storename": "early",
                 "transaction_time": "20260101T100000",
+                "pos_longitude": "121.0",
+                "pos_latitude": "31.0",
                 "region": "shanghai",
+                "is_interfere": "N",
                 "dt": "20260101",
                 "community_id": "",
             },
@@ -504,7 +667,10 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
                 "global_flow_number": "f2",
                 "storename": "normal",
                 "transaction_time": "20260102T110000",
+                "pos_longitude": "121.1",
+                "pos_latitude": "31.1",
                 "region": "shanghai",
+                "is_interfere": "N",
                 "dt": "20260102",
                 "community_id": "",
             },
@@ -519,3 +685,46 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
 
     assert transactions[hive_task.MERCHANT].tolist() == ["early", "normal"]
     assert transactions[hive_task.DT].tolist() == ["20260101", "20260102"]
+
+
+def test_load_incremental_transactions_skips_interfered_merchants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    source = pd.DataFrame(
+        [
+            {
+                "account_number": "u1",
+                "global_flow_number": "f1",
+                "storename": "interfered",
+                "transaction_time": "20260101T100000",
+                "pos_longitude": "121.0",
+                "pos_latitude": "31.0",
+                "region": "shanghai",
+                "is_interfere": "Y",
+                "dt": "20260101",
+                "community_id": "",
+            },
+            {
+                "account_number": "u2",
+                "global_flow_number": "f2",
+                "storename": "normal",
+                "transaction_time": "20260101T110000",
+                "pos_longitude": "121.1",
+                "pos_latitude": "31.1",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "dt": "20260101",
+                "community_id": "",
+            },
+        ]
+    )
+
+    transactions = hive_task.load_incremental_transactions(
+        source,
+        ("%Y%m%dT%H%M%S",),
+        "source_table",
+    )
+
+    assert transactions[hive_task.MERCHANT].tolist() == ["normal"]

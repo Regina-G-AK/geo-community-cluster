@@ -493,7 +493,7 @@ def build_hive_target_output(
     output["community_id"] = output["community_id"].map(_format_hive_id)
     output["previous_community_id"] = ""
     output["region"] = output["region"].astype(str)
-    output["is_interfere"] = 0
+    output["is_interfere"] = "N"
     output["update_time"] = output["update_time"].astype(str)
     output["is_abnormal"] = output["status"].map(_format_abnormal_status)
     output["is_position"] = output["is_position"].astype(int)
