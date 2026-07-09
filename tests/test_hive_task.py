@@ -53,7 +53,7 @@ def test_read_partitioned_hive_table_reads_part_files_and_adds_dt(
     ]
 
 
-def test_hive_target_output_formats_active_status_as_normal(
+def test_hive_target_output_formats_status_as_dict_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
@@ -87,7 +87,20 @@ def test_hive_target_output_formats_active_status_as_normal(
 
     output = hive_task.build_hive_target_output(business_results)
 
-    assert output["is_abnormal"].tolist() == ["normal", "suspect_online"]
+    assert output["is_abnormal"].tolist() == ["1", "2"]
+
+
+def test_status_name_formats_as_dict_code() -> None:
+    status_codes = importlib.import_module("business_district.status_codes")
+
+    assert status_codes.format_status_code("active") == "1"
+    assert status_codes.format_status_code("normal") == "1"
+    assert status_codes.format_status_code("suspect_online") == "2"
+    assert status_codes.format_status_code("suspect_isolated") == "3"
+    assert status_codes.format_status_code("suspect_lost") == "4"
+    assert status_codes.format_status_code("suspect_cross_region") == "5"
+    assert status_codes.format_status_code("suspect_chain_store") == "6"
+    assert status_codes.format_status_code("deleted") == "7"
 
 
 def test_hive_parameters_override_removed_ini_values(

@@ -113,13 +113,13 @@ def test_incremental_output_uses_graph_vote_and_marks_unassigned(
                 "storename": "member-a",
                 "community_id": "1",
                 "is_position": "1",
-                "is_abnormal": "normal",
+                "is_abnormal": "1",
             },
             {
                 "storename": "member-b",
                 "community_id": "2",
                 "is_position": "1",
-                "is_abnormal": "normal",
+                "is_abnormal": "1",
             },
         ]
     )
@@ -149,9 +149,9 @@ def test_incremental_output_uses_graph_vote_and_marks_unassigned(
     )
 
     assert output.loc[0, "community_id"] == "2"
-    assert output.loc[0, "is_abnormal"] == "normal"
+    assert output.loc[0, "is_abnormal"] == "1"
     assert output.loc[1, "community_id"] == ""
-    assert output.loc[1, "is_abnormal"] == "suspect_isolated"
+    assert output.loc[1, "is_abnormal"] == "3"
 
 
 def test_default_hive_task_config_uses_declared_tables(
@@ -459,7 +459,7 @@ def test_insert_new_target_rows_uses_insert_into(
                 "region": "shanghai",
                 "is_interfere": 0,
                 "update_time": "2026-01-01 10:00:00",
-                "is_abnormal": "normal",
+                "is_abnormal": "1",
                 "is_position": 0,
                 "dt": "20260101",
             }

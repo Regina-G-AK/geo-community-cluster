@@ -36,7 +36,7 @@ notebook 通过 `HiveTaskConfig` 显式传入配置路径、输入表、参数�
 python -m incremental_assignment.hive_task
 ```
 
-该入口先读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再按参数表中的 `start_date`、`end_date` 和 `region` 读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应日期分区。输入表需要包含 `community_id` 字段：同一 `storename` 只要存在任意非空 `community_id`，即视为已在商圈中；全部为空的商户才作为本次待归属新商户。同一 `storename` 对应多个非空 `community_id` 时，该商户不参与增量投票成员计算，也不会作为新商户输出。增量入口会读取 `configs/shanghai.ini` 中 `[city].code` 和 `[output].directory` 定位初始化聚类写出的 `pair_statistics_{region}.pkl`，文件不存在时直接报错；本次增量交易先形成新的商户对统计，再合并到该中间文件并立即覆盖写回。合并时已有边 `support` 保持不变、`strength` 累加；新边 `support` 使用本次增量统计值、`strength` 累加；`merchant_visit_counts` 累加。结果通过临时表加 `insert into table` 追加写入 `dev_icamp.icamp_merchant_cluster_algo_output`，写出过程不再读取目标表做去重。新商户不要求经纬度；交易共现窗口、时间衰减和最小支持人数分别来自参数表的 `max_transaction_time_interval`、`transaction_time_interval_weight` 和 `min_transaction_number`。参数表没有提供但增量计算需要的参数仍使用代码内置默认值：30 分钟到访合并、SPPMI、互为 top-k=10、最小 z-score=0.5、最高商圈分数不低于 0.55、与次高商圈分数差值不低于 0.10。增量投票按新商户连接到的存量商圈标签做边权投票，不再做锚点票权放大；不满足归属阈值时输出 `is_abnormal=suspect_isolated` 且商圈 ID 为空。
+该入口先读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再按参数表中的 `start_date`、`end_date` 和 `region` 读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应日期分区。输入表需要包含 `community_id` 字段：同一 `storename` 只要存在任意非空 `community_id`，即视为已在商圈中；全部为空的商户才作为本次待归属新商户。同一 `storename` 对应多个非空 `community_id` 时，该商户不参与增量投票成员计算，也不会作为新商户输出。增量入口会读取 `configs/shanghai.ini` 中 `[city].code` 和 `[output].directory` 定位初始化聚类写出的 `pair_statistics_{region}.pkl`，文件不存在时直接报错；本次增量交易先形成新的商户对统计，再合并到该中间文件并立即覆盖写回。合并时已有边 `support` 保持不变、`strength` 累加；新边 `support` 使用本次增量统计值、`strength` 累加；`merchant_visit_counts` 累加。结果通过临时表加 `insert into table` 追加写入 `dev_icamp.icamp_merchant_cluster_algo_output`，写出过程不再读取目标表做去重。新商户不要求经纬度；交易共现窗口、时间衰减和最小支持人数分别来自参数表的 `max_transaction_time_interval`、`transaction_time_interval_weight` 和 `min_transaction_number`。参数表没有提供但增量计算需要的参数仍使用代码内置默认值：30 分钟到访合并、SPPMI、互为 top-k=10、最小 z-score=0.5、最高商圈分数不低于 0.55、与次高商圈分数差值不低于 0.10。增量投票按新商户连接到的存量商圈标签做边权投票，不再做锚点票权放大；不满足归属阈值时输出 `is_abnormal=3` 且商圈 ID 为空。
 
 ## 商圈图生成
 
@@ -126,18 +126,21 @@ Hive 入口写入目标表字段为：
 - `is_position`
 - `dt`
 
-其中 `community_id` 为商圈 ID，连锁/泛客群多商圈商户会保留多条挂靠记录；`previous_community_id` 留空，`region` 与输入表保持一致，`is_interfere` 固定为 `0`，`update_time` 为运行时间戳，`is_abnormal` 使用当前算法状态，`is_position` 表示是否为锚点商户，`dt` 与输入表保持一致。
+其中 `community_id` 为商圈 ID，连锁/泛客群多商圈商户会保留多条挂靠记录；`previous_community_id` 留空，`region` 与输入表保持一致，`is_interfere` 固定为 `0`，`update_time` 为运行时间戳，`is_abnormal` 使用商户状态码，`is_position` 表示是否为锚点商户，`dt` 与输入表保持一致。
 
 ## 商户状态
 
-初始化聚类只输出以下状态：
+Hive 目标表 `is_abnormal` 输出以下商户状态码：
 
-- `normal`：商户进入有效商圈。
-- `suspect_isolated`：初始化聚类时商户没有有效边或所在社区未达到配置项 `anchors.minimum_community_size` 定义的有效商圈规模；增量归属时商户没有指向存量商圈成员的有效 SPPMI 边，或图投票分数未达到归入阈值。
-- `suspect_online`：迭代 hub 清洗阶段识别出的高参与度 hub 商户。
-- `suspect_cross_region`：保留给有坐标来源时的跨区域识别；当前无经纬度增量归属入口不会产出该状态。
+- `1`：正常，商户进入有效商圈。
+- `2`：疑似线上，迭代 hub 清洗阶段识别出的高参与度 hub 商户。
+- `3`：疑似孤立，初始化聚类时商户没有有效边或所在社区未达到配置项 `anchors.minimum_community_size` 定义的有效商圈规模；增量归属时商户没有指向存量商圈成员的有效 SPPMI 边，或图投票分数未达到归入阈值。
+- `4`：疑似消逝，当前初始化聚类和增量归属入口不会产出该状态。
+- `5`：疑似跨区域，保留给有坐标来源时的跨区域识别；当前无经纬度增量归属入口不会产出该状态。
+- `6`：疑似连锁店，当前初始化聚类和增量归属入口不会产出该状态。
+- `7`：已删除，当前初始化聚类和增量归属入口不会产出该状态。
 
-`suspect_lost` 不在初始化聚类中输出。
+内部算法仍使用 `normal`、`suspect_isolated`、`suspect_online` 等状态名，写入 Hive 目标表前统一转换为上述状态码。
 
 ## 测试
 

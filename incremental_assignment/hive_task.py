@@ -41,6 +41,7 @@ from business_district.intermediate import (
     read_pair_statistics,
     write_pair_statistics,
 )
+from business_district.status_codes import format_status_code, is_normal_status
 from business_district.transactions import (
     CARD,
     DT,
@@ -499,7 +500,7 @@ def _build_member_table_community_members(
         community_id = _format_hive_id(row["community_id"])
         if not storename or not community_id:
             continue
-        if _clean_text(row["is_abnormal"]) != NORMAL_STATUS:
+        if not is_normal_status(row["is_abnormal"]):
             continue
         is_anchor = _parse_position(row["is_position"], storename, community_table) == 1
         members[storename] = CommunityMember(
@@ -648,7 +649,7 @@ def build_incremental_output(
                 "region": candidate.region,
                 "is_interfere": 0,
                 "update_time": timestamp,
-                "is_abnormal": status,
+                "is_abnormal": format_status_code(status),
                 "is_position": 0,
                 "dt": candidate.dt,
             }

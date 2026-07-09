@@ -22,6 +22,7 @@ from business_district.config import (
 from business_district.errors import TransactionDataError
 from business_district.pipeline import run_algorithm_one_from_transactions
 from business_district.resource_usage import record_resource_phase
+from business_district.status_codes import format_status_code
 from business_district.transactions import RAW_TIMESTAMP, REGION, load_hive_transactions
 
 SOURCE_TABLE = "dev_icamp.icamp_merchant_cluster_algo_input"
@@ -469,10 +470,7 @@ def _format_hive_id(value: object) -> str:
 
 
 def _format_abnormal_status(value: object) -> str:
-    status = str(value)
-    if status == "active":
-        return "normal"
-    return status
+    return format_status_code(value)
 
 
 def build_hive_target_output(
