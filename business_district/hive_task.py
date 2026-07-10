@@ -258,17 +258,14 @@ def _parse_positive_float(value: object, column: str, table_name: str) -> float:
 
 
 def _parse_bool(value: object, column: str, table_name: str) -> bool:
-    text = _clean_text(value).lower()
-    true_values = {"1", "true", "yes", "y", "是"}
-    false_values = {"0", "false", "no", "n", "否"}
-    if text in true_values:
+    text = _clean_text(value)
+    if text == "1":
         return True
-    if text in false_values:
+    if text == "0":
         return False
     raise TransactionDataError(
-        "Hive 参数表字段必须是布尔值: "
-        f"table={table_name}, column={column}, value={text!r}, "
-        f"true_values={sorted(true_values)}, false_values={sorted(false_values)}"
+        "Hive 参数表字段必须是 0 或 1: "
+        f"table={table_name}, column={column}, value={text!r}"
     )
 
 
@@ -545,9 +542,9 @@ class TaskMain:
             self.dt_var = str(dtDate.dt_date(self.task_config.dt_expression))
             logrecord.log_data(f"task dt={self.dt_var}")
             parameter_dt_list = [self.dt_var]
-            parameter_data = read_partitioned_hive_table(
+            parameter_data = sd.read_table(
                 self.task_config.parameter_table,
-                parameter_dt_list,
+                dt=parameter_dt_list,
             )
             record_resource_phase("Hive参数表读取")
             parameter_data.columns = parameter_data.columns.astype("string").str.strip()

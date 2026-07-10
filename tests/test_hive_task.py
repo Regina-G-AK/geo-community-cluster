@@ -14,6 +14,7 @@ def _install_spdbccc_data_stub(monkeypatch: pytest.MonkeyPatch) -> None:
     spdbccc_data.loging = types.SimpleNamespace(log_data=lambda message: None)
     spdbccc_data.mountCheck = types.SimpleNamespace(mount_check=lambda: None)
     spdbccc_data.task = types.SimpleNamespace(finish_task=lambda: None)
+    spdbccc_data.read_table = lambda table_name, dt: pd.DataFrame()
     monkeypatch.setitem(sys.modules, "spdbccc_data", spdbccc_data)
 
 
@@ -115,6 +116,117 @@ def test_status_name_formats_as_dict_code() -> None:
     assert status_codes.format_status_code("deleted") == "7"
 
 
+def test_taskrun_reads_parameter_table_with_standard_reader(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("business_district.hive_task")
+    parameter_data = pd.DataFrame(
+        [
+            {
+                "start_date": "20260101",
+                "end_date": "20260101",
+                "region": "shanghai",
+                "max_transaction_time_interval": "90",
+                "transaction_time_interval_weight": "45",
+                "min_transaction_number": "1",
+                "min_merchant_count": "3",
+                "is_daily": "0",
+            }
+        ]
+    )
+    source_data = pd.DataFrame(
+        [
+            {
+                "storename": "shop-a",
+                "transaction_time": "20260101T100000",
+                "region": "shanghai",
+            }
+        ]
+    )
+    reads: list[tuple[str, list[str]]] = []
+    partition_reads: list[tuple[str, list[str]]] = []
+
+    def read_table(table_name: str, dt: list[str]) -> pd.DataFrame:
+        reads.append((table_name, dt))
+        if table_name == "param_table":
+            return parameter_data.copy()
+        raise AssertionError(f"unexpected table={table_name}")
+
+    def read_partitioned_hive_table(
+        table_name: str,
+        dt_values: list[str],
+    ) -> pd.DataFrame:
+        partition_reads.append((table_name, dt_values))
+        if table_name == "source_table":
+            return source_data.copy()
+        raise AssertionError(f"parameter table must use sd.read_table: {table_name}")
+
+    config = types.SimpleNamespace(
+        input=types.SimpleNamespace(timestamp_formats=("%Y%m%dT%H%M%S",))
+    )
+    business_results = pd.DataFrame(
+        [
+            {
+                "storename": "shop-a",
+                "community_id": 1,
+                "previous_community_id": "",
+                "region": "shanghai",
+                "is_interfere": 0,
+                "update_time": "2026-01-01 10:00:00",
+                "status": "active",
+                "is_position": 1,
+                "dt": "20260101",
+            }
+        ]
+    )
+    run_result = types.SimpleNamespace(
+        business_results=business_results,
+        summary=types.SimpleNamespace(output_directory="out"),
+    )
+    monkeypatch.setattr(hive_task, "sd", types.SimpleNamespace(read_table=read_table))
+    monkeypatch.setattr(
+        hive_task,
+        "read_partitioned_hive_table",
+        read_partitioned_hive_table,
+    )
+    monkeypatch.setattr(
+        hive_task,
+        "load_config_with_runtime_parameters",
+        lambda path, parameters: config,
+    )
+    monkeypatch.setattr(
+        hive_task,
+        "load_hive_transactions",
+        lambda source, timestamp_formats, dt_value, table_name: source,
+    )
+    monkeypatch.setattr(
+        hive_task,
+        "run_algorithm_one_from_transactions",
+        lambda config, transactions, source_label, source_detail: run_result,
+    )
+    monkeypatch.setattr(
+        hive_task,
+        "overwrite_target_table",
+        lambda sd, result, table_name, temp_table_name: None,
+    )
+
+    task_config = hive_task.HiveTaskConfig(
+        config_path=tmp_path / "config.ini",
+        source_table="source_table",
+        parameter_table="param_table",
+        target_table="target_table",
+        target_temp_table="temp_table",
+        dt_expression="T-1",
+    )
+    summary = hive_task.TaskMain(task_config).taskrun()
+
+    assert reads == [("param_table", ["20260101"])]
+    assert partition_reads == [("source_table", ["20260101"])]
+    assert summary.input_rows == 1
+
+
 def test_hive_parameters_override_removed_ini_values(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -213,7 +325,7 @@ def test_filter_source_data_by_parameters_uses_region_and_date(
                 "transaction_time_interval_weight": "60",
                 "min_transaction_number": "3",
                 "min_merchant_count": "3",
-                "is_daily": "true",
+                "is_daily": "1",
             }
         ]
     )
@@ -254,3 +366,27 @@ def test_filter_source_data_by_parameters_uses_region_and_date(
 
     assert filtered["storename"].tolist() == ["in-range"]
     assert hive_task.build_source_dt_list(parameters) == ["20260101", "20260102"]
+
+
+def test_hive_parameters_reject_non_numeric_is_daily(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("business_district.hive_task")
+    parameter_data = pd.DataFrame(
+        [
+            {
+                "start_date": "20260101",
+                "end_date": "20260101",
+                "region": "shanghai",
+                "max_transaction_time_interval": "120",
+                "transaction_time_interval_weight": "60",
+                "min_transaction_number": "3",
+                "min_merchant_count": "3",
+                "is_daily": "true",
+            }
+        ]
+    )
+
+    with pytest.raises(hive_task.TransactionDataError, match="0 或 1"):
+        hive_task.load_hive_algorithm_parameters(parameter_data, "param_table")

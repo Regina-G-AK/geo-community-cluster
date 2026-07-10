@@ -42,7 +42,7 @@ from business_district.intermediate import (
     read_pair_statistics,
     write_pair_statistics,
 )
-from business_district.status_codes import format_status_code, is_normal_status
+from business_district.status_codes import format_status_code
 from business_district.transactions import (
     CARD,
     DT,
@@ -65,12 +65,11 @@ from business_district.transactions import (
 from incremental_assignment.models import AssignmentConfig
 
 SOURCE_TABLE = "dev_icamp.icamp_merchant_cluster_algo_input"
-COMMUNITY_TABLE = "dev_icamp.icamp_schedule_pufa_commercial_district"
 TARGET_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output"
 TARGET_TEMP_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output_incremental_tmp"
 DEFAULT_CONFIG_PATH = Path("configs/shanghai.ini")
 DEFAULT_DT_EXPRESSION = "T-1"
-RAW_COMMUNITY_ID = "community_id"
+RAW_BUSINESS_DISTRICT = "business_district"
 DEFAULT_TIMESTAMP_FORMATS = (
     "%Y%m%dT%H%M%S",
     "%Y%m%d%H%M%S",
@@ -130,35 +129,8 @@ SOURCE_REQUIRED_COLUMNS = {
     RAW_LATITUDE,
     REGION,
     RAW_INTERFERE,
-    DT,
-    RAW_COMMUNITY_ID,
+    RAW_BUSINESS_DISTRICT,
 }
-MEMBER_COMMUNITY_REQUIRED_COLUMNS = {
-    "storename",
-    "community_id",
-    "is_position",
-    "is_abnormal",
-}
-DISTRICT_COMMUNITY_REQUIRED_COLUMNS = {
-    "district_id",
-    "district_name",
-    "status",
-}
-ACTIVE_DISTRICT_STATUSES = {
-    "1",
-    "active",
-    "enable",
-    "enabled",
-    "normal",
-    "online",
-    "valid",
-    "启用",
-    "正常",
-    "有效",
-    "上线",
-}
-
-
 @dataclass(frozen=True)
 class CommunityMember:
     storename: str
@@ -189,7 +161,6 @@ class HiveTaskConfig:
     assignment_config: AssignmentConfig
     source_table: str
     parameter_table: str
-    community_table: str
     target_table: str
     target_temp_table: str
     dt_expression: str
@@ -214,7 +185,6 @@ def build_default_hive_task_config() -> HiveTaskConfig:
         assignment_config=DEFAULT_ASSIGNMENT_CONFIG,
         source_table=SOURCE_TABLE,
         parameter_table=PARAMETER_TABLE,
-        community_table=COMMUNITY_TABLE,
         target_table=TARGET_TABLE,
         target_temp_table=TARGET_TEMP_TABLE,
         dt_expression=DEFAULT_DT_EXPRESSION,
@@ -241,25 +211,6 @@ def _clean_text(value: object) -> str:
     if pd.isna(value):
         return ""
     return str(value).strip()
-
-
-def _parse_position(value: object, storename: str, table_name: str) -> int:
-    text = _clean_text(value)
-    if not text:
-        return 0
-    try:
-        parsed = int(text)
-    except ValueError as error:
-        raise TransactionDataError(
-            "Hive 商圈表 is_position 字段格式错误: "
-            f"table={table_name}, storename={storename}, value={text}"
-        ) from error
-    if parsed not in {0, 1}:
-        raise TransactionDataError(
-            "Hive 商圈表 is_position 字段只能是 0 或 1: "
-            f"table={table_name}, storename={storename}, value={text}"
-        )
-    return parsed
 
 
 def _format_hive_id(value: object) -> str:
@@ -304,9 +255,14 @@ def _parse_transaction_time(
 def load_incremental_transactions(
     source_data: pd.DataFrame,
     timestamp_formats: tuple[str, ...],
+    dt_value: str,
     source_table: str,
 ) -> pd.DataFrame:
-    source = _require_columns(source_data, SOURCE_REQUIRED_COLUMNS, source_table)
+    source = source_data.copy()
+    source.columns = source.columns.astype("string").str.strip()
+    if DT not in source.columns:
+        source[DT] = dt_value
+    source = _require_columns(source, SOURCE_REQUIRED_COLUMNS.union({DT}), source_table)
     selected = source[
         [
             RAW_CARD,
@@ -318,7 +274,7 @@ def load_incremental_transactions(
             REGION,
             RAW_INTERFERE,
             DT,
-            RAW_COMMUNITY_ID,
+            RAW_BUSINESS_DISTRICT,
         ]
     ].copy()
     selected[RAW_CARD] = selected[RAW_CARD].astype("string").str.strip()
@@ -330,7 +286,9 @@ def load_incremental_transactions(
     selected[REGION] = selected[REGION].astype("string").str.strip()
     selected[RAW_INTERFERE] = selected[RAW_INTERFERE].astype("string").str.strip()
     selected[DT] = selected[DT].astype("string").str.strip()
-    selected[RAW_COMMUNITY_ID] = selected[RAW_COMMUNITY_ID].astype("string").str.strip()
+    selected[RAW_BUSINESS_DISTRICT] = (
+        selected[RAW_BUSINESS_DISTRICT].astype("string").str.strip()
+    )
     invalid = (
         selected[RAW_CARD].isna()
         | selected[RAW_CARD].eq("")
@@ -383,7 +341,7 @@ def load_incremental_transactions(
             LATITUDE,
             REGION,
             DT,
-            RAW_COMMUNITY_ID,
+            RAW_BUSINESS_DISTRICT,
         ]
     ].sort_values([CARD, TIMESTAMP, MERCHANT]).reset_index(drop=True)
 
@@ -463,11 +421,15 @@ def build_source_community_state(
     transactions: pd.DataFrame,
     source_table: str,
 ) -> SourceCommunityState:
-    source = _require_columns(transactions, {MERCHANT, RAW_COMMUNITY_ID}, source_table)
+    source = _require_columns(
+        transactions,
+        {MERCHANT, RAW_BUSINESS_DISTRICT},
+        source_table,
+    )
     community_ids_by_storename: dict[str, set[str]] = {}
-    for row in source[[MERCHANT, RAW_COMMUNITY_ID]].to_dict("records"):
+    for row in source[[MERCHANT, RAW_BUSINESS_DISTRICT]].to_dict("records"):
         storename = _clean_text(row[MERCHANT])
-        community_id = _format_hive_id(row[RAW_COMMUNITY_ID])
+        community_id = _format_hive_id(row[RAW_BUSINESS_DISTRICT])
         if not storename or not community_id:
             continue
         if storename not in community_ids_by_storename:
@@ -490,7 +452,7 @@ def build_source_community_state(
     if not members:
         raise TransactionDataError(
             "Hive 输入表没有可用存量商圈成员: "
-            f"table={source_table}, community_id_column={RAW_COMMUNITY_ID}"
+            f"table={source_table}, business_district_column={RAW_BUSINESS_DISTRICT}"
         )
 
     return SourceCommunityState(
@@ -498,102 +460,6 @@ def build_source_community_state(
         members=members,
         skipped_multi_community_storenames=frozenset(skipped_storenames),
     )
-
-
-def _existing_storenames(community_data: pd.DataFrame) -> set[str]:
-    if "storename" in community_data.columns:
-        column = "storename"
-    elif "district_name" in community_data.columns:
-        column = "district_name"
-    else:
-        return set()
-    return {
-        _clean_text(value)
-        for value in community_data[column].tolist()
-        if _clean_text(value)
-    }
-
-
-def _is_active_district_status(value: object) -> bool:
-    return _clean_text(value).lower() in ACTIVE_DISTRICT_STATUSES
-
-
-def _build_member_table_community_members(
-    community_data: pd.DataFrame,
-    community_table: str,
-) -> dict[str, CommunityMember]:
-    community = _require_columns(
-        community_data,
-        MEMBER_COMMUNITY_REQUIRED_COLUMNS,
-        community_table,
-    )
-    members: dict[str, CommunityMember] = {}
-    for row in community.to_dict("records"):
-        storename = _clean_text(row["storename"])
-        community_id = _format_hive_id(row["community_id"])
-        if not storename or not community_id:
-            continue
-        if not is_normal_status(row["is_abnormal"]):
-            continue
-        is_anchor = _parse_position(row["is_position"], storename, community_table) == 1
-        members[storename] = CommunityMember(
-            storename=storename,
-            community_id=community_id,
-            is_anchor=is_anchor,
-        )
-    return members
-
-
-def _build_district_table_community_members(
-    community_data: pd.DataFrame,
-    community_table: str,
-) -> dict[str, CommunityMember]:
-    community = _require_columns(
-        community_data,
-        DISTRICT_COMMUNITY_REQUIRED_COLUMNS,
-        community_table,
-    )
-    members: dict[str, CommunityMember] = {}
-    for row in community.to_dict("records"):
-        storename = _clean_text(row["district_name"])
-        community_id = _format_hive_id(row["district_id"])
-        if not storename or not community_id:
-            continue
-        if not _is_active_district_status(row["status"]):
-            continue
-        members[storename] = CommunityMember(
-            storename=storename,
-            community_id=community_id,
-            is_anchor=True,
-        )
-    return members
-
-
-def build_community_members(
-    community_data: pd.DataFrame,
-    community_table: str,
-) -> dict[str, CommunityMember]:
-    columns = set(community_data.columns.astype("string").str.strip())
-    if MEMBER_COMMUNITY_REQUIRED_COLUMNS.issubset(columns):
-        members = _build_member_table_community_members(community_data, community_table)
-    elif DISTRICT_COMMUNITY_REQUIRED_COLUMNS.issubset(columns):
-        members = _build_district_table_community_members(community_data, community_table)
-    else:
-        required_options = [
-            sorted(MEMBER_COMMUNITY_REQUIRED_COLUMNS),
-            sorted(DISTRICT_COMMUNITY_REQUIRED_COLUMNS),
-        ]
-        raise TransactionDataError(
-            "Hive 商圈表缺少可用字段组: "
-            f"table={community_table}, required_options={required_options}"
-        )
-    if not members:
-        raise TransactionDataError(
-            "Hive 商圈表没有可用存量商圈标签: "
-            f"table={community_table}, "
-            "required=member table normal rows or active district rows"
-        )
-    return members
 
 
 def _community_sort_key(community_id: str) -> tuple[int, str]:
@@ -968,6 +834,7 @@ class TaskMain:
             transactions = load_incremental_transactions(
                 filtered_source_data,
                 self.task_config.timestamp_formats,
+                self.dt_var,
                 self.task_config.source_table,
             )
             visits = merge_visits(transactions, self.task_config.visit_config)

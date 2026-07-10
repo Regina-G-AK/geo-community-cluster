@@ -37,11 +37,9 @@ class _FakeTaskSd:
         self,
         parameter_data: pd.DataFrame,
         source_data: pd.DataFrame,
-        community_data: pd.DataFrame,
     ) -> None:
         self.parameter_data = parameter_data
         self.source_data = source_data
-        self.community_data = community_data
         self.reads: list[tuple[str, list[str]]] = []
         self.sql: list[str] = []
         self.tables: list[pd.DataFrame] = []
@@ -51,9 +49,9 @@ class _FakeTaskSd:
         if table_name == "param_table":
             return self.parameter_data.copy()
         if table_name == "source_table":
+            if "dt" not in self.source_data.columns:
+                return self.source_data.copy()
             return self.source_data.loc[self.source_data["dt"].isin(dt)].copy()
-        if table_name == "community_table":
-            return self.community_data.copy()
         raise AssertionError(f"unexpected table={table_name}")
 
     def execute_sql(self, sql: str) -> None:
@@ -102,23 +100,18 @@ def test_incremental_output_uses_graph_vote_and_marks_unassigned(
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
     hive_task = importlib.import_module("incremental_assignment.hive_task")
-    community_data = pd.DataFrame(
-        [
-            {
-                "storename": "member-a",
-                "community_id": "1",
-                "is_position": "1",
-                "is_abnormal": "1",
-            },
-            {
-                "storename": "member-b",
-                "community_id": "2",
-                "is_position": "1",
-                "is_abnormal": "1",
-            },
-        ]
-    )
-    members = hive_task.build_community_members(community_data, "community_table")
+    members = {
+        "member-a": hive_task.CommunityMember(
+            storename="member-a",
+            community_id="1",
+            is_anchor=False,
+        ),
+        "member-b": hive_task.CommunityMember(
+            storename="member-b",
+            community_id="2",
+            is_anchor=False,
+        ),
+    }
     graph = nx.Graph()
     graph.add_edge("new-shop", "member-a", weight=1.0)
     graph.add_edge("new-shop", "member-b", weight=3.0)
@@ -313,7 +306,6 @@ def test_default_hive_task_config_uses_declared_tables(
     assert config.config_path == Path("configs/shanghai.ini")
     assert config.source_table == "dev_icamp.icamp_merchant_cluster_algo_input"
     assert config.parameter_table == "dev_icamp.icamp_merchant_cluster_algo_param"
-    assert config.community_table == "dev_icamp.icamp_schedule_pufa_commercial_district"
     assert config.target_table == "dev_icamp.icamp_merchant_cluster_algo_output"
     assert config.timestamp_formats == (
         "%Y%m%dT%H%M%S",
@@ -390,10 +382,10 @@ def test_source_community_state_skips_multi_community_members(
     hive_task = importlib.import_module("incremental_assignment.hive_task")
     transactions = pd.DataFrame(
         [
-            {hive_task.MERCHANT: "stable", "community_id": "1"},
-            {hive_task.MERCHANT: "multi", "community_id": "1"},
-            {hive_task.MERCHANT: "multi", "community_id": "2"},
-            {hive_task.MERCHANT: "new", "community_id": ""},
+            {hive_task.MERCHANT: "stable", "business_district": "1"},
+            {hive_task.MERCHANT: "multi", "business_district": "1"},
+            {hive_task.MERCHANT: "multi", "business_district": "2"},
+            {hive_task.MERCHANT: "new", "business_district": ""},
         ]
     )
 
@@ -436,8 +428,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "pos_latitude": "31.0",
                 "region": "shanghai",
                 "is_interfere": "N",
-                "dt": "20260101",
-                "community_id": "D001",
+                "business_district": "D001",
             },
             {
                 "account_number": "u1",
@@ -448,8 +439,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "pos_latitude": "31.0001",
                 "region": "shanghai",
                 "is_interfere": "N",
-                "dt": "20260101",
-                "community_id": "",
+                "business_district": "",
             },
             {
                 "account_number": "u2",
@@ -460,21 +450,11 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "pos_latitude": "31.2",
                 "region": "shanghai",
                 "is_interfere": "N",
-                "dt": "20260103",
-                "community_id": "",
+                "business_district": "",
             },
         ]
     )
-    community_data = pd.DataFrame(
-        [
-            {
-                "district_id": "D001",
-                "district_name": "old-shop",
-                "status": "正常",
-            }
-        ]
-    )
-    fake_sd = _FakeTaskSd(parameter_data, source_data, community_data)
+    fake_sd = _FakeTaskSd(parameter_data, source_data)
     monkeypatch.setattr(hive_task, "sd", fake_sd)
     output_directory = tmp_path / "algorithm_one_output"
     output_directory.mkdir()
@@ -552,7 +532,6 @@ directory = "{output_directory.as_posix()}"
         assignment_config=_config(3000.0, 50000.0),
         source_table="source_table",
         parameter_table="param_table",
-        community_table="community_table",
         target_table="target_table",
         target_temp_table="temp_table",
         dt_expression="T-1",
@@ -562,7 +541,6 @@ directory = "{output_directory.as_posix()}"
 
     assert ("param_table", ["20260101"]) in fake_sd.reads
     assert ("source_table", ["20260101", "20260102"]) in fake_sd.reads
-    assert ("community_table", ["20260101"]) not in fake_sd.reads
     assert summary.source_rows == 2
     assert summary.community_rows == 1
     assert summary.inserted_rows == 1
@@ -572,33 +550,6 @@ directory = "{output_directory.as_posix()}"
         statistics = pickle.load(file)
     assert statistics.supports[("new-shop", "old-shop")] == 1
     assert statistics.merchant_visit_counts == {"new-shop": 1, "old-shop": 1}
-
-
-def test_build_community_members_accepts_district_table(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install_spdbccc_data_stub(monkeypatch)
-    hive_task = importlib.import_module("incremental_assignment.hive_task")
-    community_data = pd.DataFrame(
-        [
-            {
-                "district_id": "D001",
-                "district_name": "district-a",
-                "status": "正常",
-            },
-            {
-                "district_id": "D002",
-                "district_name": "district-b",
-                "status": "停用",
-            },
-        ]
-    )
-
-    members = hive_task.build_community_members(community_data, "district_table")
-
-    assert sorted(members) == ["district-a"]
-    assert members["district-a"].community_id == "D001"
-    assert members["district-a"].is_anchor is True
 
 
 def test_insert_new_target_rows_uses_insert_into(
@@ -648,7 +599,7 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
                 "region": "shanghai",
                 "is_interfere": "N",
                 "dt": "20260102",
-                "community_id": "",
+                "business_district": "",
             },
             {
                 "account_number": "u1",
@@ -660,7 +611,7 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
                 "region": "shanghai",
                 "is_interfere": "N",
                 "dt": "20260101",
-                "community_id": "",
+                "business_district": "",
             },
             {
                 "account_number": "u2",
@@ -672,7 +623,7 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
                 "region": "shanghai",
                 "is_interfere": "N",
                 "dt": "20260102",
-                "community_id": "",
+                "business_district": "",
             },
         ]
     )
@@ -680,11 +631,43 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
     transactions = hive_task.load_incremental_transactions(
         source,
         ("%Y%m%dT%H%M%S",),
+        "20260101",
         "source_table",
     )
 
     assert transactions[hive_task.MERCHANT].tolist() == ["early", "normal"]
     assert transactions[hive_task.DT].tolist() == ["20260101", "20260102"]
+
+
+def test_load_incremental_transactions_fills_missing_hive_partition_dt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    source = pd.DataFrame(
+        [
+            {
+                "account_number": "u1",
+                "global_flow_number": "f1",
+                "storename": "normal",
+                "transaction_time": "20260101T100000",
+                "pos_longitude": "121.0",
+                "pos_latitude": "31.0",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "business_district": "D001",
+            }
+        ]
+    )
+
+    transactions = hive_task.load_incremental_transactions(
+        source,
+        ("%Y%m%dT%H%M%S",),
+        "20260101",
+        "source_table",
+    )
+
+    assert transactions[hive_task.DT].tolist() == ["20260101"]
 
 
 def test_load_incremental_transactions_skips_interfered_merchants(
@@ -704,7 +687,7 @@ def test_load_incremental_transactions_skips_interfered_merchants(
                 "region": "shanghai",
                 "is_interfere": "Y",
                 "dt": "20260101",
-                "community_id": "",
+                "business_district": "",
             },
             {
                 "account_number": "u2",
@@ -716,7 +699,7 @@ def test_load_incremental_transactions_skips_interfered_merchants(
                 "region": "shanghai",
                 "is_interfere": "N",
                 "dt": "20260101",
-                "community_id": "",
+                "business_district": "",
             },
         ]
     )
@@ -724,6 +707,7 @@ def test_load_incremental_transactions_skips_interfered_merchants(
     transactions = hive_task.load_incremental_transactions(
         source,
         ("%Y%m%dT%H%M%S",),
+        "20260101",
         "source_table",
     )
 
