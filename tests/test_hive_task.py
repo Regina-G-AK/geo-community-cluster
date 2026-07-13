@@ -103,6 +103,68 @@ def test_hive_target_output_formats_status_as_dict_code(
     assert output["is_interfere"].tolist() == ["N", "N", "N"]
 
 
+def test_overwrite_target_table_replaces_current_regions_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("business_district.hive_task")
+    sql_statements: list[str] = []
+    written_tables: list[tuple[pd.DataFrame, str]] = []
+
+    def execute_sql(sql: str) -> None:
+        sql_statements.append(sql)
+
+    def write_table(
+        dataframe: pd.DataFrame,
+        table_name: str,
+        debug: bool,
+        dt: None,
+    ) -> None:
+        assert debug is False
+        assert dt is None
+        written_tables.append((dataframe.copy(), table_name))
+
+    fake_sd = types.SimpleNamespace(
+        execute_sql=execute_sql,
+        write_table=write_table,
+    )
+    output = pd.DataFrame(
+        [
+            {
+                "storename": "new-shop",
+                "community_id": "1",
+                "previous_community_id": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "update_time": "2026-01-01 10:00:00",
+                "is_abnormal": "1",
+                "is_position": 0,
+                "dt": "20260101",
+            }
+        ]
+    )
+
+    hive_task.overwrite_target_table(
+        fake_sd,
+        output,
+        "target_table",
+        "temp_table",
+    )
+
+    joined_sql = " ".join(" ".join(sql.split()) for sql in sql_statements).lower()
+    assert len(written_tables) == 1
+    assert written_tables[0][1] == "temp_table"
+    assert written_tables[0][0]["region"].tolist() == ["shanghai"]
+    assert "create table temp_table_merged as" in joined_sql
+    assert "from target_table target" in joined_sql
+    assert "select distinct region from temp_table" in joined_sql
+    assert "target.region = source_regions.region" in joined_sql
+    assert "source_regions.region is null" in joined_sql
+    assert "union all" in joined_sql
+    assert "insert overwrite table target_table partition (dt=20260101)" in joined_sql
+    assert "from temp_table_merged" in joined_sql
+
+
 def test_status_name_formats_as_dict_code() -> None:
     status_codes = importlib.import_module("business_district.status_codes")
 

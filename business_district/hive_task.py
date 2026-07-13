@@ -510,21 +510,47 @@ def overwrite_target_table(
     if result.empty:
         return
 
-    select_columns = ", ".join(TARGET_SELECT_COLUMNS)
+    target_select_columns = ", ".join(
+        f"target.{column}" for column in TARGET_SELECT_COLUMNS
+    )
+    source_select_columns = ", ".join(
+        f"source.{column}" for column in TARGET_SELECT_COLUMNS
+    )
+    merged_select_columns = ", ".join(TARGET_SELECT_COLUMNS)
+    merged_temp_table_name = f"{temp_table_name}_merged"
     for dt_value, partition_df in result.groupby("dt", sort=True):
         write_df = partition_df.drop(columns=["dt"]).reset_index(drop=True)
         sd.execute_sql(f"drop table if exists {temp_table_name}")
+        sd.execute_sql(f"drop table if exists {merged_temp_table_name}")
         try:
             sd.write_table(write_df, temp_table_name, debug=False, dt=None)
             sd.execute_sql(
                 f"""
+                create table {merged_temp_table_name} as
+                select {target_select_columns}
+                from {table_name} target
+                left join (
+                    select distinct region
+                    from {temp_table_name}
+                ) source_regions
+                on target.region = source_regions.region
+                where target.dt = {dt_value}
+                  and source_regions.region is null
+                union all
+                select {source_select_columns}
+                from {temp_table_name} source
+                """
+            )
+            sd.execute_sql(
+                f"""
                 insert overwrite table {table_name}
                 partition (dt={dt_value})
-                select {select_columns}
-                from {temp_table_name}
+                select {merged_select_columns}
+                from {merged_temp_table_name}
                 """
             )
         finally:
+            sd.execute_sql(f"drop table if exists {merged_temp_table_name}")
             sd.execute_sql(f"drop table if exists {temp_table_name}")
 
 
@@ -627,15 +653,19 @@ class TaskMain:
 
     def destroy(self) -> None:
         errors: list[Exception] = []
-        table_name = self.task_config.target_temp_table
-        try:
-            sd.execute_sql(f"drop table if exists {table_name}")
-            record_resource_phase("Hive任务清理")
-        except Exception as error:
-            errors.append(error)
-            logrecord.log_data(
-                f"drop temp table failed table={table_name}, error={error}"
-            )
+        table_names = [
+            f"{self.task_config.target_temp_table}_merged",
+            self.task_config.target_temp_table,
+        ]
+        for table_name in table_names:
+            try:
+                sd.execute_sql(f"drop table if exists {table_name}")
+                record_resource_phase("Hive任务清理")
+            except Exception as error:
+                errors.append(error)
+                logrecord.log_data(
+                    f"drop temp table failed table={table_name}, error={error}"
+                )
         if errors:
             raise RuntimeError(
                 f"Hive 临时表清理失败: failed_count={len(errors)}"

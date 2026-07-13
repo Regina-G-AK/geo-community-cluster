@@ -18,7 +18,7 @@ Hive 环境可使用旧线上任务风格入口：
 python -m business_district.hive_task
 ```
 
-该入口通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再按参数表中的 `start_date`、`end_date` 和 `region` 读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应日期分区。`configs/shanghai.ini` 只保留静态算法配置，交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供。结果通过临时表覆盖写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的对应 `dt` 分区，不再写入风险商户表。
+该入口通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再按参数表中的 `start_date`、`end_date` 和 `region` 读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应日期分区。`configs/shanghai.ini` 只保留静态算法配置，交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供。结果写入 `dev_icamp.icamp_merchant_cluster_algo_output` 时，会在对应 `dt` 分区内保留其他 `region` 的已有结果，并用本次结果替换相同 `region` 的已有结果，不再写入风险商户表。
 
 Hive 初始化入口的交易输入表会按 `/appdata/project/yw061178/tbl/{表名}/dt={日期}/part*` 分片读取 parquet 文件并合并；当分片数据缺少 `dt` 列时会按分区日期自动补齐。
 
