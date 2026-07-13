@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import datetime
+import multiprocessing
 import time
-import tracemalloc
 from dataclasses import dataclass
-from pathlib import Path
 from types import ModuleType
 
 import networkx as nx
@@ -14,13 +13,13 @@ from spdbccc_data import dtDate
 from spdbccc_data import formattedExc
 from spdbccc_data import loging as logrecord
 from spdbccc_data import mountCheck
-from spdbccc_data import task as taskfinish
 
 from business_district.config import (
+    AppConfig,
     CooccurrenceConfig,
     GraphConfig,
     VisitConfig,
-    load_config_with_runtime_parameters,
+    apply_runtime_parameters,
 )
 from business_district.errors import TransactionDataError
 from business_district.graph import (
@@ -50,14 +49,17 @@ from business_district.transactions import (
     LATITUDE,
     LONGITUDE,
     MERCHANT,
+    MERCHANT_CATEGORY,
     RAW_CARD,
     RAW_INTERFERE,
     RAW_LATITUDE,
     RAW_LONGITUDE,
     RAW_MERCHANT,
+    RAW_MERCHANT_CATEGORY,
     RAW_TIMESTAMP,
     REGION,
     TIMESTAMP,
+    filter_clustering_merchant_categories,
     keep_first_hive_flow_number_rows,
     merge_visits,
     _parse_coordinates,
@@ -67,35 +69,7 @@ from incremental_assignment.models import AssignmentConfig
 SOURCE_TABLE = "dev_icamp.icamp_merchant_cluster_algo_input"
 TARGET_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output"
 TARGET_TEMP_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output_incremental_tmp"
-DEFAULT_CONFIG_PATH = Path("configs/shanghai.ini")
-DEFAULT_DT_EXPRESSION = "T-1"
 RAW_BUSINESS_DISTRICT = "business_district"
-DEFAULT_TIMESTAMP_FORMATS = (
-    "%Y%m%dT%H%M%S",
-    "%Y%m%d%H%M%S",
-    "%Y-%m-%d %H:%M:%S",
-    "%Y/%m/%d %H:%M:%S",
-)
-DEFAULT_VISIT_CONFIG = VisitConfig(
-    merge_window_minutes=30,
-    maximum_daily_merchants_per_card=30,
-)
-DEFAULT_GRAPH_CONFIG = GraphConfig(
-    edge_weight_method="sppmi",
-    context_smoothing_alpha=0.75,
-    sppmi_shift=3.0,
-    top_k_neighbors=10,
-    minimum_z_score=0.5,
-)
-DEFAULT_ASSIGNMENT_CONFIG = AssignmentConfig(
-    top_k_neighbors=15,
-    theta=0.55,
-    delta=0.10,
-    graph_weight=0.6,
-    geo_weight=0.3,
-    community_assignment_distance_meters=3000.0,
-    city_maximum_distance_meters=50000.0,
-)
 NORMAL_STATUS = "normal"
 SUSPECT_ISOLATED_STATUS = "suspect_isolated"
 SUSPECT_CROSS_REGION_STATUS = "suspect_cross_region"
@@ -130,6 +104,7 @@ SOURCE_REQUIRED_COLUMNS = {
     REGION,
     RAW_INTERFERE,
     RAW_BUSINESS_DISTRICT,
+    RAW_MERCHANT_CATEGORY,
 }
 @dataclass(frozen=True)
 class CommunityMember:
@@ -150,11 +125,12 @@ class HiveCandidateMerchant:
     storename: str
     region: str
     dt: str
+    merchant_category: int
 
 
 @dataclass(frozen=True)
 class HiveTaskConfig:
-    config_path: Path
+    algorithm_config: AppConfig
     timestamp_formats: tuple[str, ...]
     visit_config: VisitConfig
     graph_config: GraphConfig
@@ -174,21 +150,6 @@ class HiveTaskSummary:
     candidate_count: int
     inserted_rows: int
     target_table: str
-
-
-def build_default_hive_task_config() -> HiveTaskConfig:
-    return HiveTaskConfig(
-        config_path=DEFAULT_CONFIG_PATH,
-        timestamp_formats=DEFAULT_TIMESTAMP_FORMATS,
-        visit_config=DEFAULT_VISIT_CONFIG,
-        graph_config=DEFAULT_GRAPH_CONFIG,
-        assignment_config=DEFAULT_ASSIGNMENT_CONFIG,
-        source_table=SOURCE_TABLE,
-        parameter_table=PARAMETER_TABLE,
-        target_table=TARGET_TABLE,
-        target_temp_table=TARGET_TEMP_TABLE,
-        dt_expression=DEFAULT_DT_EXPRESSION,
-    )
 
 
 def _require_columns(
@@ -263,6 +224,7 @@ def load_incremental_transactions(
     if DT not in source.columns:
         source[DT] = dt_value
     source = _require_columns(source, SOURCE_REQUIRED_COLUMNS.union({DT}), source_table)
+    source = filter_clustering_merchant_categories(source, source_table)
     selected = source[
         [
             RAW_CARD,
@@ -275,6 +237,7 @@ def load_incremental_transactions(
             RAW_INTERFERE,
             DT,
             RAW_BUSINESS_DISTRICT,
+            RAW_MERCHANT_CATEGORY,
         ]
     ].copy()
     selected[RAW_CARD] = selected[RAW_CARD].astype("string").str.strip()
@@ -289,6 +252,7 @@ def load_incremental_transactions(
     selected[RAW_BUSINESS_DISTRICT] = (
         selected[RAW_BUSINESS_DISTRICT].astype("string").str.strip()
     )
+    selected[RAW_MERCHANT_CATEGORY] = selected[RAW_MERCHANT_CATEGORY].astype(int)
     invalid = (
         selected[RAW_CARD].isna()
         | selected[RAW_CARD].eq("")
@@ -329,6 +293,7 @@ def load_incremental_transactions(
         columns={
             RAW_CARD: CARD,
             RAW_MERCHANT: MERCHANT,
+            RAW_MERCHANT_CATEGORY: MERCHANT_CATEGORY,
         }
     )
     return result[
@@ -342,6 +307,7 @@ def load_incremental_transactions(
             REGION,
             DT,
             RAW_BUSINESS_DISTRICT,
+            MERCHANT_CATEGORY,
         ]
     ].sort_values([CARD, TIMESTAMP, MERCHANT]).reset_index(drop=True)
 
@@ -351,7 +317,7 @@ def load_source_candidates(
     existing_storenames: set[str],
     dt_value: str,
 ) -> list[HiveCandidateMerchant]:
-    selected = transactions[[MERCHANT, TIMESTAMP, REGION]].copy()
+    selected = transactions[[MERCHANT, TIMESTAMP, REGION, MERCHANT_CATEGORY]].copy()
     ordered = selected.sort_values([MERCHANT, TIMESTAMP])
     latest = ordered.drop_duplicates(subset=[MERCHANT], keep="last")
 
@@ -365,6 +331,7 @@ def load_source_candidates(
                 storename=storename,
                 region=_clean_text(row[REGION]),
                 dt=dt_value,
+                merchant_category=int(row[MERCHANT_CATEGORY]),
             )
         )
     return candidates
@@ -675,76 +642,75 @@ def _top_two(scores: dict[str, float]) -> tuple[str, str | None, float, float]:
     return top_id, second_id, top_score, second_score
 
 
-def build_incremental_output(
-    candidates: list[HiveCandidateMerchant],
+IncrementalOutputRow = dict[str, str | int]
+IncrementalOutputTask = tuple[
+    tuple[HiveCandidateMerchant, ...],
+    nx.Graph,
+    dict[str, CommunityMember],
+    dict[str, CoordinatePoint],
+    dict[str, CoordinatePoint],
+    AssignmentConfig,
+    str,
+]
+
+
+def _build_incremental_row(
+    candidate: HiveCandidateMerchant,
     graph: nx.Graph,
     members: dict[str, CommunityMember],
     candidate_coordinates: dict[str, CoordinatePoint],
     member_coordinates: dict[str, CoordinatePoint],
     assignment_config: AssignmentConfig,
-    update_time: datetime.datetime,
-) -> pd.DataFrame:
-    timestamp = update_time.strftime("%Y-%m-%d %H:%M:%S")
-    rows: list[dict[str, str | int]] = []
-    for candidate in candidates:
-        status_override = _geographic_status_override(
-            candidate,
-            candidate_coordinates,
-            member_coordinates,
-            members,
-            assignment_config,
-        )
-        if status_override is not None:
-            rows.append(
-                {
-                    "storename": candidate.storename,
-                    "community_id": "",
-                    "previous_community_id": "",
-                    "region": candidate.region,
-                    "is_interfere": "N",
-                    "update_time": timestamp,
-                    "is_abnormal": format_status_code(status_override),
-                    "is_position": 0,
-                    "dt": candidate.dt,
-                }
-            )
-            continue
-        graph_scores = _graph_candidate_scores(
-            candidate,
-            graph,
-            members,
-            assignment_config,
-        )
-        geographic_scores = _geographic_candidate_scores(
-            candidate,
-            candidate_coordinates,
-            member_coordinates,
-            members,
-            assignment_config,
-        )
-        scores = _merge_candidate_scores(
-            graph_scores,
-            geographic_scores,
-            assignment_config,
-        )
-        if scores:
-            top_id, _, top_score, second_score = _top_two(scores)
-            if (
-                top_score >= assignment_config.theta
-                and top_score - second_score >= assignment_config.delta
-            ):
-                assigned_community_id = top_id
-                status = NORMAL_STATUS
-            else:
-                assigned_community_id = ""
-                status = SUSPECT_ISOLATED_STATUS
-        else:
-            assigned_community_id = ""
-            status = SUSPECT_ISOLATED_STATUS
-        rows.append(
+    timestamp: str,
+) -> list[IncrementalOutputRow]:
+    status_override = _geographic_status_override(
+        candidate,
+        candidate_coordinates,
+        member_coordinates,
+        members,
+        assignment_config,
+    )
+    if status_override is not None:
+        return [
             {
                 "storename": candidate.storename,
-                "community_id": assigned_community_id,
+                "community_id": "",
+                "previous_community_id": "",
+                "region": candidate.region,
+                "is_interfere": "N",
+                "update_time": timestamp,
+                "is_abnormal": format_status_code(status_override),
+                "is_position": 0,
+                "dt": candidate.dt,
+            }
+        ]
+    graph_scores = _graph_candidate_scores(
+        candidate,
+        graph,
+        members,
+        assignment_config,
+    )
+    geographic_scores = _geographic_candidate_scores(
+        candidate,
+        candidate_coordinates,
+        member_coordinates,
+        members,
+        assignment_config,
+    )
+    scores = _merge_candidate_scores(
+        graph_scores,
+        geographic_scores,
+        assignment_config,
+    )
+    if candidate.merchant_category == 2:
+        community_ids = sorted(scores, key=_community_sort_key)
+        if not community_ids:
+            community_ids = [""]
+        status = NORMAL_STATUS if scores else SUSPECT_ISOLATED_STATUS
+        return [
+            {
+                "storename": candidate.storename,
+                "community_id": community_id,
                 "previous_community_id": "",
                 "region": candidate.region,
                 "is_interfere": "N",
@@ -753,7 +719,103 @@ def build_incremental_output(
                 "is_position": 0,
                 "dt": candidate.dt,
             }
+            for community_id in community_ids
+        ]
+    assigned_community_id = ""
+    status = SUSPECT_ISOLATED_STATUS
+    if scores:
+        top_id, _, top_score, second_score = _top_two(scores)
+        if (
+            top_score >= assignment_config.theta
+            and top_score - second_score >= assignment_config.delta
+        ):
+            assigned_community_id = top_id
+            status = NORMAL_STATUS
+    return [
+        {
+            "storename": candidate.storename,
+            "community_id": assigned_community_id,
+            "previous_community_id": "",
+            "region": candidate.region,
+            "is_interfere": "N",
+            "update_time": timestamp,
+            "is_abnormal": format_status_code(status),
+            "is_position": 0,
+            "dt": candidate.dt,
+        }
+    ]
+
+
+def _build_incremental_rows(task: IncrementalOutputTask) -> list[IncrementalOutputRow]:
+    (
+        candidates,
+        graph,
+        members,
+        candidate_coordinates,
+        member_coordinates,
+        assignment_config,
+        timestamp,
+    ) = task
+    return [
+        row
+        for candidate in candidates
+        for row in _build_incremental_row(
+            candidate,
+            graph,
+            members,
+            candidate_coordinates,
+            member_coordinates,
+            assignment_config,
+            timestamp,
         )
+    ]
+
+
+def build_incremental_output(
+    candidates: list[HiveCandidateMerchant],
+    graph: nx.Graph,
+    members: dict[str, CommunityMember],
+    candidate_coordinates: dict[str, CoordinatePoint],
+    member_coordinates: dict[str, CoordinatePoint],
+    assignment_config: AssignmentConfig,
+    update_time: datetime.datetime,
+    process_count: int,
+) -> pd.DataFrame:
+    if process_count < 1:
+        raise ValueError(f"进程数必须不小于 1: process_count={process_count}")
+    timestamp = update_time.strftime("%Y-%m-%d %H:%M:%S")
+    chunk_count = min(len(candidates), process_count * 4)
+    chunk_size = (
+        (len(candidates) + chunk_count - 1) // chunk_count
+        if chunk_count > 0
+        else 0
+    )
+    candidate_chunks = (
+        tuple(
+            tuple(candidates[index : index + chunk_size])
+            for index in range(0, len(candidates), chunk_size)
+        )
+        if chunk_size > 0
+        else tuple()
+    )
+    tasks: list[IncrementalOutputTask] = [
+        (
+            chunk,
+            graph,
+            members,
+            candidate_coordinates,
+            member_coordinates,
+            assignment_config,
+            timestamp,
+        )
+        for chunk in candidate_chunks
+    ]
+    if process_count == 1 or len(tasks) <= 1:
+        row_chunks = [_build_incremental_rows(task) for task in tasks]
+    else:
+        with multiprocessing.Pool(processes=process_count) as pool:
+            row_chunks = pool.map(_build_incremental_rows, tasks)
+    rows = [row for row_chunk in row_chunks for row in row_chunk]
     return pd.DataFrame(rows, columns=TARGET_COLUMNS)
 
 
@@ -809,8 +871,8 @@ class TaskMain:
                 parameters,
                 self.task_config.parameter_table,
             )
-            algorithm_config = load_config_with_runtime_parameters(
-                self.task_config.config_path,
+            algorithm_config = apply_runtime_parameters(
+                self.task_config.algorithm_config,
                 runtime_config,
             )
             cooccurrence_config = CooccurrenceConfig(
@@ -838,7 +900,11 @@ class TaskMain:
                 self.task_config.source_table,
             )
             visits = merge_visits(transactions, self.task_config.visit_config)
-            incremental_statistics = build_pair_statistics(visits, cooccurrence_config)
+            incremental_statistics = build_pair_statistics(
+                visits,
+                cooccurrence_config,
+                algorithm_config.runtime.process_count,
+            )
             pair_statistics_path = build_pair_statistics_path(
                 algorithm_config.output.directory,
                 algorithm_config.city.code,
@@ -881,6 +947,7 @@ class TaskMain:
                 member_coordinates,
                 self.task_config.assignment_config,
                 datetime.datetime.now().astimezone(),
+                algorithm_config.runtime.process_count,
             )
             insert_new_target_rows(
                 sd,
@@ -925,19 +992,10 @@ def run_hive_task(task_config: HiveTaskConfig) -> HiveTaskSummary:
 
 
 def main() -> None:
-    tracemalloc.start()
-    start_time = datetime.datetime.now()
-    run_hive_task(build_default_hive_task_config())
-
-    end_time = datetime.datetime.now()
-    time_difference = end_time - start_time
-    logrecord.log_data(f"incremental task use time {time_difference}")
-    current_memory, peak_memory = tracemalloc.get_traced_memory()
-    print(
-        f"memory_current_mb = {current_memory / 1024 / 1024:.2f},"
-        f"memory_peak_mb = {peak_memory / 1024 / 1024:.2f}"
+    raise RuntimeError(
+        "项目不再提供代码内默认配置，请通过 "
+        "notebooks/run_hive_business_district.ipynb 构造 HiveTaskConfig 并运行"
     )
-    taskfinish.finish_task()
 
 
 if __name__ == "__main__":

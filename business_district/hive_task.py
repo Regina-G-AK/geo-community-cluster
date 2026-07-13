@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import datetime
 import time
-import tracemalloc
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -13,11 +12,11 @@ from spdbccc_data import dtDate
 from spdbccc_data import formattedExc
 from spdbccc_data import loging as logrecord
 from spdbccc_data import mountCheck
-from spdbccc_data import task as taskfinish
 
 from business_district.config import (
+    AppConfig,
     AlgorithmRuntimeConfig,
-    load_config_with_runtime_parameters,
+    apply_runtime_parameters,
 )
 from business_district.errors import TransactionDataError
 from business_district.pipeline import run_algorithm_one_from_transactions
@@ -29,8 +28,6 @@ SOURCE_TABLE = "dev_icamp.icamp_merchant_cluster_algo_input"
 PARAMETER_TABLE = "dev_icamp.icamp_merchant_cluster_algo_param"
 TARGET_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output"
 TARGET_TEMP_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output_tmp"
-DEFAULT_CONFIG_PATH = Path("configs/shanghai.ini")
-DEFAULT_DT_EXPRESSION = "T-1"
 HIVE_TABLE_ROOT = Path("/appdata/project/fid_bg_icmp/tbl")
 TARGET_COLUMNS = [
     "storename",
@@ -161,7 +158,7 @@ def read_partitioned_hive_table(
 
 @dataclass(frozen=True)
 class HiveTaskConfig:
-    config_path: Path
+    algorithm_config: AppConfig
     source_table: str
     parameter_table: str
     target_table: str
@@ -189,17 +186,6 @@ class HiveAlgorithmParameter:
     min_transaction_number: int
     min_merchant_count: int
     is_daily: bool
-
-
-def build_default_hive_task_config() -> HiveTaskConfig:
-    return HiveTaskConfig(
-        config_path=DEFAULT_CONFIG_PATH,
-        source_table=SOURCE_TABLE,
-        parameter_table=PARAMETER_TABLE,
-        target_table=TARGET_TABLE,
-        target_temp_table=TARGET_TEMP_TABLE,
-        dt_expression=DEFAULT_DT_EXPRESSION,
-    )
 
 
 def _clean_text(value: object) -> str:
@@ -582,8 +568,8 @@ class TaskMain:
                 parameters,
                 self.task_config.parameter_table,
             )
-            config = load_config_with_runtime_parameters(
-                self.task_config.config_path,
+            config = apply_runtime_parameters(
+                self.task_config.algorithm_config,
                 runtime_config,
             )
             record_resource_phase("Hive参数解析")
@@ -682,19 +668,10 @@ def run_hive_task(task_config: HiveTaskConfig) -> HiveTaskSummary:
 
 
 def main() -> None:
-    tracemalloc.start()
-    start_time = datetime.datetime.now()
-    run_hive_task(build_default_hive_task_config())
-
-    end_time = datetime.datetime.now()
-    time_difference = end_time - start_time
-    logrecord.log_data(f"task use time {time_difference}")
-    current_memory, peak_memory = tracemalloc.get_traced_memory()
-    print(
-        f"memory_current_mb = {current_memory / 1024 / 1024:.2f},"
-        f"memory_peak_mb = {peak_memory / 1024 / 1024:.2f}"
+    raise RuntimeError(
+        "项目不再提供代码内默认配置，请通过 "
+        "notebooks/run_hive_business_district.ipynb 构造 HiveTaskConfig 并运行"
     )
-    taskfinish.finish_task()
 
 
 if __name__ == "__main__":

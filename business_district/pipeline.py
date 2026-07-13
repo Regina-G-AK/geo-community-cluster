@@ -32,6 +32,8 @@ from business_district.results import (
 )
 from business_district.resource_usage import record_resource_phase
 from business_district.transactions import (
+    MERCHANT,
+    MERCHANT_CATEGORY,
     build_merchant_metadata,
     load_transactions,
     merge_visits,
@@ -75,6 +77,7 @@ def run_algorithm_one_from_transactions(
     statistics: PairStatistics = build_pair_statistics(
         visits,
         config.cooccurrence,
+        config.runtime.process_count,
     )
     record_resource_phase("商户对统计")
     write_pair_statistics(
@@ -104,6 +107,13 @@ def run_algorithm_one_from_transactions(
         statistics.merchant_visit_counts,
         chain_visit_count_threshold,
     )
+    category_chain_merchant_ids = set(
+        prepared_transactions.loc[
+            prepared_transactions[MERCHANT_CATEGORY].eq(2),
+            MERCHANT,
+        ].astype(str)
+    ) if MERCHANT_CATEGORY in prepared_transactions.columns else set()
+    chain_like_merchant_ids.update(category_chain_merchant_ids)
     record_resource_phase("连锁商户识别")
     clustering_graph = graph.copy()
     clustering_graph.remove_nodes_from(chain_like_merchant_ids)
@@ -127,6 +137,7 @@ def run_algorithm_one_from_transactions(
         config.anchors,
         candidate_community_shares,
         chain_like_merchant_ids,
+        category_chain_merchant_ids,
         chain_visit_count_threshold,
         config.city.code,
     )

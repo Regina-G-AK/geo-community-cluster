@@ -156,8 +156,12 @@ def _connected_community_count(
 
 
 def _chain_reason(
+    merchant_id: str,
     is_chain_like: bool,
+    category_chain_merchant_ids: set[str],
 ) -> str:
+    if merchant_id in category_chain_merchant_ids:
+        return "merchant_category"
     if is_chain_like:
         return "visit_count"
     return ""
@@ -167,6 +171,7 @@ def _add_chain_like_flags(
     merchants: pd.DataFrame,
     community_shares: dict[str, dict[int, float]],
     chain_like_merchant_ids: set[str],
+    category_chain_merchant_ids: set[str],
     chain_visit_count_threshold: int,
 ) -> pd.DataFrame:
     if merchants.empty:
@@ -191,8 +196,12 @@ def _add_chain_like_flags(
         int
     )
     enriched["chain_reason"] = [
-        _chain_reason(chain_flag)
-        for chain_flag in is_chain_like
+        _chain_reason(str(merchant_id), chain_flag, category_chain_merchant_ids)
+        for merchant_id, chain_flag in zip(
+            enriched["merchant_id"].tolist(),
+            is_chain_like,
+            strict=True,
+        )
     ]
     return enriched
 
@@ -214,6 +223,7 @@ def _build_chain_membership_rows(
     statistics: PairStatistics,
     candidate_community_shares: dict[str, dict[int, float]],
     city_code: str,
+    category_chain_merchant_ids: set[str],
     chain_visit_count_threshold: int,
 ) -> list[dict[str, str | int | float]]:
     rows: list[dict[str, str | int | float]] = []
@@ -247,7 +257,11 @@ def _build_chain_membership_rows(
                     "connected_community_count": connected_community_count,
                     "chain_visit_count_threshold": chain_visit_count_threshold,
                     "is_chain_like": 1,
-                    "chain_reason": "visit_count",
+                    "chain_reason": (
+                        "merchant_category"
+                        if merchant_id in category_chain_merchant_ids
+                        else "visit_count"
+                    ),
                     "visit_count": int(
                         statistics.merchant_visit_counts.get(merchant_id, 0)
                     ),
@@ -262,6 +276,7 @@ def build_merchant_results(
     anchor_config: AnchorConfig,
     candidate_community_shares: dict[str, dict[int, float]],
     chain_like_merchant_ids: set[str],
+    category_chain_merchant_ids: set[str],
     chain_visit_count_threshold: int,
     city_code: str,
 ) -> pd.DataFrame:
@@ -320,6 +335,7 @@ def build_merchant_results(
         result,
         community_shares,
         chain_like_merchant_ids,
+        category_chain_merchant_ids,
         chain_visit_count_threshold,
     )
     if not result.empty:
@@ -353,6 +369,7 @@ def build_merchant_results(
         statistics,
         candidate_community_shares,
         city_code,
+        category_chain_merchant_ids,
         chain_visit_count_threshold,
     )
     if chain_rows:
@@ -460,6 +477,11 @@ def build_business_results(
             if pd.notna(getattr(row, "is_chain_like"))
             else 0
         )
+        chain_reason = (
+            str(getattr(row, "chain_reason"))
+            if pd.notna(getattr(row, "chain_reason"))
+            else ""
+        )
         community_id = (
             int(raw_community_id)
             if pd.notna(raw_community_id)
@@ -471,7 +493,11 @@ def build_business_results(
         if pd.notna(raw_status) and str(raw_status) == "suspect_online":
             status = "suspect_online"
             community_id = ""
-        elif community_id != "" and is_chain_like == 1:
+        elif (
+            community_id != ""
+            and is_chain_like == 1
+            and chain_reason != "merchant_category"
+        ):
             status = "suspect_chain_store"
         primary_community_id = (
             int(raw_primary_community_id)
@@ -515,11 +541,7 @@ def build_business_results(
                     else 0
                 ),
                 "is_chain_like": is_chain_like,
-                "chain_reason": (
-                    str(getattr(row, "chain_reason"))
-                    if pd.notna(getattr(row, "chain_reason"))
-                    else ""
-                ),
+                "chain_reason": chain_reason,
                 "chain_visit_count_threshold": (
                     int(getattr(row, "chain_visit_count_threshold"))
                     if pd.notna(getattr(row, "chain_visit_count_threshold"))

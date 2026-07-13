@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import multiprocessing
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -22,32 +23,33 @@ class PairStatistics:
     merchant_visit_counts: dict[str, int]
 
 
-def build_pair_statistics(
-    visits: pd.DataFrame,
-    config: CooccurrenceConfig,
-) -> PairStatistics:
+PairStatisticsTask = tuple[
+    tuple[tuple[str, tuple[tuple[str, pd.Timestamp], ...]], ...],
+    CooccurrenceConfig,
+]
+
+
+def _build_pair_statistics_chunk(task: PairStatisticsTask) -> PairStatistics:
+    groups, config = task
     window = pd.Timedelta(minutes=config.window_minutes)
     strength_by_pair: dict[MerchantPair, float] = defaultdict(float)
     support_by_pair: dict[MerchantPair, int] = defaultdict(int)
-    merchant_visit_counts = Counter(visits[MERCHANT].astype(str))
+    merchant_visit_counts: Counter[str] = Counter()
 
-    for _, group in visits.groupby(CARD, sort=False):
-        ordered = group.sort_values(TIMESTAMP)
-        rows = list(ordered[[MERCHANT, TIMESTAMP]].itertuples(index=False, name=None))
+    for _, rows in groups:
+        merchant_visit_counts.update(merchant_id for merchant_id, _ in rows)
         user_pair_max: dict[MerchantPair, float] = {}
-
         for left_index, (left_merchant, left_timestamp) in enumerate(rows[:-1]):
             for right_merchant, right_timestamp in rows[left_index + 1 :]:
-                delta = pd.Timestamp(right_timestamp) - pd.Timestamp(left_timestamp)
+                delta = right_timestamp - left_timestamp
                 if delta > window:
                     break
                 if left_merchant == right_merchant:
                     continue
-                pair = tuple(sorted((str(left_merchant), str(right_merchant))))
+                pair = tuple(sorted((left_merchant, right_merchant)))
                 minutes = delta.total_seconds() / 60.0
                 weight = math.exp(-minutes / config.decay_tau_minutes)
                 user_pair_max[pair] = max(user_pair_max.get(pair, 0.0), weight)
-
         for pair, weight in user_pair_max.items():
             strength_by_pair[pair] += weight
             support_by_pair[pair] += 1
@@ -57,6 +59,60 @@ def build_pair_statistics(
         supports=dict(support_by_pair),
         merchant_visit_counts=dict(merchant_visit_counts),
     )
+
+
+def _partition_card_groups(
+    visits: pd.DataFrame,
+    process_count: int,
+) -> tuple[tuple[tuple[str, tuple[tuple[str, pd.Timestamp], ...]], ...], ...]:
+    groups = tuple(
+        (
+            str(card_id),
+            tuple(
+                (str(merchant_id), pd.Timestamp(timestamp))
+                for merchant_id, timestamp in group.sort_values(TIMESTAMP)[
+                    [MERCHANT, TIMESTAMP]
+                ].itertuples(index=False, name=None)
+            ),
+        )
+        for card_id, group in visits.groupby(CARD, sort=False)
+    )
+    chunk_count = min(len(groups), process_count * 4)
+    if chunk_count == 0:
+        return tuple()
+    return tuple(groups[index::chunk_count] for index in range(chunk_count))
+
+
+def _merge_pair_statistics_chunks(
+    chunks: list[PairStatistics],
+) -> PairStatistics:
+    strengths: dict[MerchantPair, float] = defaultdict(float)
+    supports: dict[MerchantPair, int] = defaultdict(int)
+    visit_counts: Counter[str] = Counter()
+    for chunk in chunks:
+        for pair, strength in chunk.strengths.items():
+            strengths[pair] += strength
+        for pair, support in chunk.supports.items():
+            supports[pair] += support
+        visit_counts.update(chunk.merchant_visit_counts)
+    return PairStatistics(dict(strengths), dict(supports), dict(visit_counts))
+
+
+def build_pair_statistics(
+    visits: pd.DataFrame,
+    config: CooccurrenceConfig,
+    process_count: int,
+) -> PairStatistics:
+    if process_count < 1:
+        raise ValueError(f"进程数必须不小于 1: process_count={process_count}")
+    partitions = _partition_card_groups(visits, process_count)
+    tasks = [(partition, config) for partition in partitions]
+    if process_count == 1 or len(tasks) <= 1:
+        chunks = [_build_pair_statistics_chunk(task) for task in tasks]
+    else:
+        with multiprocessing.Pool(processes=process_count) as pool:
+            chunks = pool.map(_build_pair_statistics_chunk, tasks)
+    return _merge_pair_statistics_chunks(chunks)
 
 
 def _calculate_sppmi_candidates(

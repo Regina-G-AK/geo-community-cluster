@@ -6,6 +6,38 @@ import types
 import pandas as pd
 import pytest
 
+from business_district.config import (
+    AnchorConfig,
+    AppConfig,
+    CityConfig,
+    CommunityConfig,
+    CooccurrenceConfig,
+    GeoConfig,
+    GraphConfig,
+    InputConfig,
+    OutputConfig,
+    RuntimeConfig,
+    VisitConfig,
+)
+
+
+def _app_config(tmp_path: Path) -> AppConfig:
+    return AppConfig(
+        city=CityConfig(code="test-city", name="测试市"),
+        input=InputConfig(
+            transactions_path=tmp_path / "data.txt",
+            timestamp_formats=("%Y%m%dT%H%M%S",),
+        ),
+        visits=VisitConfig(30, 30),
+        cooccurrence=CooccurrenceConfig(1, 1.0, 1),
+        graph=GraphConfig("transaction_count", 0.75, 1.0, 5, 0.0),
+        community=CommunityConfig("leiden", 1.0, 42, 2, 10, 0.9),
+        geo=GeoConfig(1000.0),
+        anchors=AnchorConfig(1, 2, 2, 1, 0.99, 1.0, 100),
+        output=OutputConfig(tmp_path / "output"),
+        runtime=RuntimeConfig(2),
+    )
+
 
 def _install_spdbccc_data_stub(monkeypatch: pytest.MonkeyPatch) -> None:
     spdbccc_data = types.ModuleType("spdbccc_data")
@@ -255,8 +287,8 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
     )
     monkeypatch.setattr(
         hive_task,
-        "load_config_with_runtime_parameters",
-        lambda path, parameters: config,
+        "apply_runtime_parameters",
+        lambda algorithm_config, parameters: config,
     )
     monkeypatch.setattr(
         hive_task,
@@ -275,7 +307,7 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
     )
 
     task_config = hive_task.HiveTaskConfig(
-        config_path=tmp_path / "config.ini",
+        algorithm_config=_app_config(tmp_path),
         source_table="source_table",
         parameter_table="param_table",
         target_table="target_table",
@@ -289,61 +321,12 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
     assert summary.input_rows == 1
 
 
-def test_hive_parameters_override_removed_ini_values(
+def test_hive_parameters_override_notebook_values(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
     hive_task = importlib.import_module("business_district.hive_task")
-    config_module = importlib.import_module("business_district.config")
-    config_path = tmp_path / "city.ini"
-    config_path.write_text(
-        f"""
-[city]
-code = "test-city"
-name = "测试市"
-
-[input]
-transactions_path = "../data.txt"
-timestamp_formats = %Y%m%dT%H%M%S
-
-[visits]
-merge_window_minutes = 30
-maximum_daily_merchants_per_card = 30
-
-[cooccurrence]
-
-[graph]
-edge_weight_method = "transaction_count"
-context_smoothing_alpha = 0.75
-sppmi_shift = 1.0
-top_k_neighbors = 5
-minimum_z_score = 0.0
-
-[community]
-algorithm = "leiden"
-resolution = 1.0
-random_seed = 42
-maximum_cleaning_rounds = 2
-minimum_hub_degree = 10
-participation_threshold = 0.9
-
-[geo]
-cluster_radius_meters = 1000.0
-
-[anchors]
-minimum_count = 1
-maximum_count = 2
-merchants_per_anchor = 2
-maximum_participation = 0.99
-chain_visit_count_quantile = 1.0
-chain_minimum_visit_count = 100
-
-[output]
-directory = "{(tmp_path / 'output').as_posix()}"
-""",
-        encoding="utf-8",
-    )
     parameter_data = pd.DataFrame(
         [
             {
@@ -361,8 +344,8 @@ directory = "{(tmp_path / 'output').as_posix()}"
 
     parameters = hive_task.load_hive_algorithm_parameters(parameter_data, "param_table")
     runtime_config = hive_task.build_runtime_config(parameters, "param_table")
-    config = config_module.load_config_with_runtime_parameters(
-        config_path,
+    config = hive_task.apply_runtime_parameters(
+        _app_config(tmp_path),
         runtime_config,
     )
 

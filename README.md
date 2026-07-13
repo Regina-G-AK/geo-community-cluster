@@ -2,23 +2,17 @@
 
 本项目实现基于交易共现关系的商圈初始化聚类。主流程直接读取原始交易数据，在内存中构建商户对、商户图和社区结果；本地运行目录只保留可复用的商户对中间文件，Hive 入口负责写入商圈业务结果表。
 
-## 运行
+## 运行与配置
 
-```powershell
-python -m business_district --config configs/shanghai.ini
-```
+本项目不再读取 INI、TOML 等配置文件，也不提供带默认参数的命令行任务入口。初始化聚类和增量归属统一通过 `notebooks/run_hive_business_district.ipynb` 配置和运行；城市、输入格式、图算法、社区算法、地理参数、锚点、输出目录、增量归属及工作进程数均在 notebook 的配置单元中显式构造。
+
+`RuntimeConfig.process_count` 配置工作进程数，必须是不小于 `1` 的整数；notebook 当前使用 `4`。初始化聚类会按卡号分片并行计算商户对统计，增量归属会按候选商户分片并行计算图与地理评分。设置为 `1` 时使用相同的串行计算逻辑，适合小数据量运行。
 
 每次运行会直接在 `[output].directory` 下写入 `pair_statistics_{region}.pkl` 商户对中间文件，其中 `region` 使用 `[city].code`。
 
 本地入口会在运行结束后输出资源监测结果：`elapsed_seconds` 表示总耗时，`python_memory_current_mb` 和 `python_memory_peak_mb` 表示 Python 已跟踪内存，`python_memory_peak_phase` 表示 Python 内存峰值出现的阶段；`process_memory_current_mb` 和 `process_memory_peak_mb` 表示进程 RSS 当前值和监控打点中的最高值，`process_memory_peak_phase` 表示进程内存峰值所在阶段。生产 Linux 环境中优先使用 `process_memory_peak_mb` 和 `process_memory_peak_phase` 估算当前配置和数据量需要的内存资源；不支持进程口径的平台会显示 `unavailable`。
 
-Hive 环境可使用旧线上任务风格入口：
-
-```powershell
-python -m business_district.hive_task
-```
-
-该入口通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再按参数表中的 `start_date`、`end_date` 和 `region` 读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应日期分区。`configs/shanghai.ini` 只保留静态算法配置，交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供。结果写入 `dev_icamp.icamp_merchant_cluster_algo_output` 时，会在对应 `dt` 分区内保留其他 `region` 的已有结果，并用本次结果替换相同 `region` 的已有结果，不再写入风险商户表。
+Hive 任务通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再按参数表中的 `start_date`、`end_date` 和 `region` 读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应日期分区。交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供，其余静态算法参数由 notebook 提供。结果写入 `dev_icamp.icamp_merchant_cluster_algo_output` 时，会在对应 `dt` 分区内保留其他 `region` 的已有结果，并用本次结果替换相同 `region` 的已有结果，不再写入风险商户表。
 
 Hive 初始化入口的交易输入表会按 `/appdata/project/yw061178/tbl/{表名}/dt={日期}/part*` 分片读取 parquet 文件并合并；当分片数据缺少 `dt` 列时会按分区日期自动补齐。
 
@@ -28,15 +22,9 @@ Jupyter 环境可直接打开：
 notebooks/run_hive_business_district.ipynb
 ```
 
-notebook 通过 `HiveTaskConfig` 显式传入配置路径、输入表、参数表、输出表、临时表和 `dt_expression`，先普通读取参数表 T-1 分区，再按 `is_daily` 调度入口：`1` 调用增量归属，`0` 调用初始化聚类。
+notebook 通过 `HiveTaskConfig` 显式传入强类型算法配置、输入表、参数表、输出表、临时表和 `dt_expression`，先普通读取参数表 T-1 分区，再按 `is_daily` 调度入口：`1` 调用增量归属，`0` 调用初始化聚类。
 
-增量归属 Hive 入口用于把新商户追加归入已有商圈：
-
-```powershell
-python -m incremental_assignment.hive_task
-```
-
-该入口先读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再按参数表中的 `start_date`、`end_date` 和 `region` 读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应日期分区。输入表需要包含 `business_district` 字段，`dt` 作为 Hive 分区字段不要求出现在读取结果中，缺失时会用当前任务分区补齐：同一 `storename` 只要存在任意非空 `business_district`，即视为已在商圈中；全部为空的商户才作为本次待归属新商户。同一 `storename` 对应多个非空 `business_district` 时，该商户不参与增量投票成员计算，也不会作为新商户输出；同一 `storename` 只要任意输入行 `is_interfere=Y`，该商户整组交易不参与增量统计、候选归属或输出。增量入口会读取 `configs/shanghai.ini` 中 `[city].code` 和 `[output].directory` 定位初始化聚类写出的 `pair_statistics_{region}.pkl`，文件不存在时直接报错；本次增量交易先形成新的商户对统计，再合并到该中间文件并立即覆盖写回。合并时已有边 `support` 保持不变、`strength` 累加；新边 `support` 使用本次增量统计值、`strength` 累加；`merchant_visit_counts` 累加。结果通过临时表加 `insert into table` 追加写入 `dev_icamp.icamp_merchant_cluster_algo_output`，写出过程不再读取目标表做去重。交易共现窗口、时间衰减和最小支持人数分别来自参数表的 `max_transaction_time_interval`、`transaction_time_interval_weight` 和 `min_transaction_number`。参数表没有提供但增量计算需要的参数仍使用代码内置默认值：30 分钟到访合并、SPPMI、互为 top-k=10、最小 z-score=0.5、图投票权重 0.6、地理投票权重 0.3、地理匹配距离不超过 3000 米、跨区域距离阈值 50000 米、最高融合分数不低于 0.55、与次高商圈分数差值不低于 0.10。有经纬度的新商户会先与已有商圈成员商户比对最近距离：最近距离超过 50000 米时输出 `is_abnormal=5` 且不再图投票；最近距离大于 3000 米且不超过 50000 米时输出 `is_abnormal=3` 且不再图投票；最近距离不超过 3000 米时，再融合图投票和地理投票。缺少经纬度时只使用图投票，缺少图边时可只使用地理投票；不满足归属阈值时输出 `is_abnormal=3` 且商圈 ID 为空。
+增量归属用于把新商户追加归入已有商圈。任务先读取参数表和输入表；输入表需要包含 `business_district` 字段。增量任务根据 notebook 中 `algorithm_config.city.code` 和 `algorithm_config.output.directory` 定位初始化聚类写出的 `pair_statistics_{region}.pkl`，文件不存在时直接报错。到访合并、图构建、图与地理投票、距离阈值和归属阈值均在 notebook 配置单元中显式设置，不再使用代码内置默认参数。
 
 ## 商圈图生成
 
@@ -90,6 +78,7 @@ Hive 入口输入表必须包含：
 - `account_number`
 - `global_flow_number`
 - `storename`
+- `merchant_category`
 - `transaction_time`
 - `pos_longitude`
 - `pos_latitude`
@@ -98,7 +87,7 @@ Hive 入口输入表必须包含：
 - `is_abnormal`
 - `business_district`
 
-`pos_longitude`、`pos_latitude`、`is_interfere`、`is_abnormal` 和 `business_district` 在输入时允许为空。`dt` 是 Hive 分区和输出字段，不要求读取结果包含该列；缺失时入口会按分区或任务日期补齐。经纬度只空一列、格式非法或越界时按无坐标处理；有效经纬度会参与初始化地理种子聚类，输出字段保持不变，不额外暴露内部拆分门店 ID。
+`merchant_category` 必须是 `0`（线上）、`1`（线下）、`2`（线下连锁店）或 `3`（线下个体户）；同一 `storename` 对应多个分类会直接报错。初始化和增量任务只保留分类 `1`、`2` 的交易进入访问合并、候选边构建和聚类。分类 `2` 不进入社区发现且永远不能成为锚点，但会按正权重候选社区展开为一个或多个普通商圈成员；增量任务同样允许分类 `2` 输出多个商圈归属。`pos_longitude`、`pos_latitude`、`is_interfere`、`is_abnormal` 和 `business_district` 在输入时允许为空。`dt` 是 Hive 分区和输出字段，不要求读取结果包含该列；缺失时入口会按分区或任务日期补齐。经纬度只空一列、格式非法或越界时按无坐标处理；有效经纬度会参与初始化地理种子聚类，输出字段保持不变，不额外暴露内部拆分门店 ID。
 
 Hive 参数表 `dev_icamp.icamp_merchant_cluster_algo_param` 必须包含：
 
@@ -125,7 +114,7 @@ Hive 入口写入目标表字段为：
 - `is_position`
 - `dt`
 
-其中 `community_id` 为商圈 ID，连锁/泛客群多商圈商户会保留多条挂靠记录；`previous_community_id` 留空，`region` 与输入表保持一致，`is_interfere` 固定为 `N`，`update_time` 为运行时间戳，`is_abnormal` 使用商户状态码，`is_position` 表示是否为锚点商户，`dt` 使用输入分区或当前任务分区。
+其中 `community_id` 为商圈 ID，分类 `2` 的线下连锁店及访问量规则识别出的连锁/泛客群商户可保留多条普通成员挂靠记录且 `is_position` 恒为 `0`；`previous_community_id` 留空，`region` 与输入表保持一致，`is_interfere` 固定为 `N`，`update_time` 为运行时间戳，`is_abnormal` 使用商户状态码，`is_position` 表示是否为锚点商户，`dt` 使用输入分区或当前任务分区。
 
 ## 商户状态
 
@@ -136,7 +125,7 @@ Hive 目标表 `is_abnormal` 输出以下商户状态码：
 - `3`：疑似孤立，初始化聚类时商户没有有效边或所在社区未达到配置项 `anchors.minimum_community_size` 定义的有效商圈规模；增量归属时商户没有指向存量商圈成员的有效 SPPMI 边，或图投票分数未达到归入阈值。
 - `4`：疑似消逝，当前初始化聚类和增量归属入口不会产出该状态。
 - `5`：疑似跨区域，增量归属时有经纬度的新商户与已有商圈成员商户最近距离超过跨区域距离阈值时产出。
-- `6`：疑似连锁店，初始化聚类识别出连锁/泛客群商户且仍挂靠有效商圈时产出。
+- `6`：疑似连锁店，初始化聚类通过访问量规则识别出连锁/泛客群商户且仍挂靠有效商圈时产出；明确标记为 `merchant_category=2` 的线下连锁店按普通成员输出正常状态。
 - `7`：已删除，当前初始化聚类和增量归属入口不会产出该状态。
 
 内部算法仍使用 `normal`、`suspect_isolated`、`suspect_online` 等状态名，写入 Hive 目标表前统一转换为上述状态码。

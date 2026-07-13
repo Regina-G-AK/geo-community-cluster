@@ -10,9 +10,16 @@ import pytest
 from business_district.community import CleaningResult, detect_communities
 from business_district.config import (
     AnchorConfig,
+    AppConfig,
+    CityConfig,
+    CommunityConfig,
     CooccurrenceConfig,
+    GeoConfig,
     GraphConfig,
-    load_config,
+    InputConfig,
+    OutputConfig,
+    RuntimeConfig,
+    VisitConfig,
 )
 from business_district.errors import TransactionDataError
 from business_district.geo import prepare_geographic_transactions
@@ -78,6 +85,57 @@ def _write_transaction_file(path: Path, rows: list[str]) -> None:
     path.write_text("\n".join([header, *rows]), encoding="utf-8")
 
 
+def _app_config(
+    transaction_path: Path,
+    output_path: Path,
+    minimum_unique_users: int,
+    maximum_cleaning_rounds: int,
+) -> AppConfig:
+    return AppConfig(
+        city=CityConfig(code="test-city", name="测试市"),
+        input=InputConfig(
+            transactions_path=transaction_path,
+            timestamp_formats=("%Y%m%dT%H%M%S",),
+        ),
+        visits=VisitConfig(
+            merge_window_minutes=30,
+            maximum_daily_merchants_per_card=30,
+        ),
+        cooccurrence=CooccurrenceConfig(
+            window_minutes=120,
+            decay_tau_minutes=60.0,
+            minimum_unique_users=minimum_unique_users,
+        ),
+        graph=GraphConfig(
+            edge_weight_method="transaction_count",
+            context_smoothing_alpha=0.75,
+            sppmi_shift=1.0,
+            top_k_neighbors=5,
+            minimum_z_score=0.0,
+        ),
+        community=CommunityConfig(
+            algorithm="leiden",
+            resolution=1.0,
+            random_seed=42,
+            maximum_cleaning_rounds=maximum_cleaning_rounds,
+            minimum_hub_degree=10,
+            participation_threshold=0.9,
+        ),
+        geo=GeoConfig(cluster_radius_meters=1000.0),
+        anchors=AnchorConfig(
+            minimum_count=1,
+            maximum_count=2,
+            merchants_per_anchor=2,
+            minimum_community_size=2,
+            maximum_participation=0.99,
+            chain_visit_count_quantile=1.0,
+            chain_minimum_visit_count=100,
+        ),
+        output=OutputConfig(directory=output_path),
+        runtime=RuntimeConfig(process_count=2),
+    )
+
+
 def test_user_pair_contribution_uses_maximum() -> None:
     visits = pd.DataFrame(
         [
@@ -94,6 +152,7 @@ def test_user_pair_contribution_uses_maximum() -> None:
             decay_tau_minutes=60.0,
             minimum_unique_users=1,
         ),
+        2,
     )
 
     assert statistics.supports[("a", "b")] == 1
@@ -101,6 +160,27 @@ def test_user_pair_contribution_uses_maximum() -> None:
         math.exp(-10.0 / 60.0),
         6,
     )
+
+
+def test_pair_statistics_multiprocessing_matches_serial_result() -> None:
+    visits = pd.DataFrame(
+        [
+            {CARD: "u1", MERCHANT: "a", TIMESTAMP: pd.Timestamp("2026-01-01 10:00:00")},
+            {CARD: "u1", MERCHANT: "b", TIMESTAMP: pd.Timestamp("2026-01-01 10:10:00")},
+            {CARD: "u2", MERCHANT: "b", TIMESTAMP: pd.Timestamp("2026-01-01 11:00:00")},
+            {CARD: "u2", MERCHANT: "c", TIMESTAMP: pd.Timestamp("2026-01-01 11:20:00")},
+        ]
+    )
+    config = CooccurrenceConfig(
+        window_minutes=60,
+        decay_tau_minutes=30.0,
+        minimum_unique_users=1,
+    )
+
+    serial = build_pair_statistics(visits, config, 1)
+    parallel = build_pair_statistics(visits, config, 2)
+
+    assert parallel == serial
 
 
 def test_load_transactions_rejects_duplicate_flow_number(tmp_path: Path) -> None:
@@ -112,61 +192,13 @@ def test_load_transactions_rejects_duplicate_flow_number(tmp_path: Path) -> None
             _transaction_row("u2", "f1", "b", "20260101T101000", "上海", "20260101"),
         ],
     )
-    config_path = tmp_path / "city.ini"
-    config_path.write_text(
-        f"""
-[city]
-code = "test-city"
-name = "测试市"
-
-[input]
-transactions_path = "{transaction_path.as_posix()}"
-timestamp_formats = %Y%m%dT%H%M%S
-
-[visits]
-merge_window_minutes = 30
-maximum_daily_merchants_per_card = 30
-
-[cooccurrence]
-window_minutes = 120
-decay_tau_minutes = 60.0
-minimum_unique_users = 1
-
-[graph]
-edge_weight_method = "transaction_count"
-context_smoothing_alpha = 0.75
-sppmi_shift = 1.0
-top_k_neighbors = 5
-minimum_z_score = 0.0
-
-[community]
-algorithm = "leiden"
-resolution = 1.0
-random_seed = 42
-maximum_cleaning_rounds = 2
-minimum_hub_degree = 10
-participation_threshold = 0.9
-
-[geo]
-cluster_radius_meters = 1000.0
-
-[anchors]
-minimum_count = 1
-maximum_count = 2
-merchants_per_anchor = 2
-minimum_community_size = 2
-maximum_participation = 0.99
-chain_visit_count_quantile = 1.0
-chain_minimum_visit_count = 100
-
-[output]
-directory = "{(tmp_path / 'output').as_posix()}"
-""",
-        encoding="utf-8",
-    )
-
     with pytest.raises(TransactionDataError, match="重复流水号"):
-        load_transactions(load_config(config_path).input)
+        load_transactions(
+            InputConfig(
+                transactions_path=transaction_path,
+                timestamp_formats=("%Y%m%dT%H%M%S",),
+            )
+        )
 
 
 def test_load_hive_transactions_fills_partition_dt() -> None:
@@ -176,6 +208,7 @@ def test_load_hive_transactions_fills_partition_dt() -> None:
                 "account_number": "u1",
                 "global_flow_number": "f1",
                 "storename": "a",
+                "merchant_category": "1",
                 "transaction_time": "20260101T100000",
                 "pos_longitude": "",
                 "pos_latitude": "",
@@ -203,6 +236,7 @@ def test_load_hive_transactions_keeps_first_duplicate_flow_day() -> None:
                 "account_number": "u1",
                 "global_flow_number": "f1",
                 "storename": "late",
+                "merchant_category": "1",
                 "transaction_time": "20260102T100000",
                 "pos_longitude": "",
                 "pos_latitude": "",
@@ -215,6 +249,7 @@ def test_load_hive_transactions_keeps_first_duplicate_flow_day() -> None:
                 "account_number": "u1",
                 "global_flow_number": "f1",
                 "storename": "early",
+                "merchant_category": "1",
                 "transaction_time": "20260101T100000",
                 "pos_longitude": "",
                 "pos_latitude": "",
@@ -227,6 +262,7 @@ def test_load_hive_transactions_keeps_first_duplicate_flow_day() -> None:
                 "account_number": "u2",
                 "global_flow_number": "f2",
                 "storename": "normal",
+                "merchant_category": "1",
                 "transaction_time": "20260102T110000",
                 "pos_longitude": "",
                 "pos_latitude": "",
@@ -256,6 +292,7 @@ def test_load_hive_transactions_treats_invalid_coordinates_as_missing() -> None:
                 "account_number": "u1",
                 "global_flow_number": "f1",
                 "storename": "partial",
+                "merchant_category": "1",
                 "transaction_time": "20260101T100000",
                 "pos_longitude": "121.0",
                 "pos_latitude": "",
@@ -268,6 +305,7 @@ def test_load_hive_transactions_treats_invalid_coordinates_as_missing() -> None:
                 "account_number": "u2",
                 "global_flow_number": "f2",
                 "storename": "bad-number",
+                "merchant_category": "1",
                 "transaction_time": "20260101T101000",
                 "pos_longitude": "bad",
                 "pos_latitude": "31.0",
@@ -280,6 +318,7 @@ def test_load_hive_transactions_treats_invalid_coordinates_as_missing() -> None:
                 "account_number": "u3",
                 "global_flow_number": "f3",
                 "storename": "out-of-range",
+                "merchant_category": "1",
                 "transaction_time": "20260101T102000",
                 "pos_longitude": "181.0",
                 "pos_latitude": "31.0",
@@ -300,6 +339,66 @@ def test_load_hive_transactions_treats_invalid_coordinates_as_missing() -> None:
 
     assert transactions[LONGITUDE].isna().all()
     assert transactions[LATITUDE].isna().all()
+
+
+def test_load_hive_transactions_keeps_only_offline_categories() -> None:
+    source = pd.DataFrame(
+        [
+            {
+                "account_number": f"u{category}",
+                "global_flow_number": f"f{category}",
+                "storename": f"shop-{category}",
+                "merchant_category": str(category),
+                "transaction_time": "20260101T100000",
+                "pos_longitude": "",
+                "pos_latitude": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "is_abnormal": "",
+                "dt": "20260101",
+            }
+            for category in range(4)
+        ]
+    )
+
+    transactions = load_hive_transactions(
+        source,
+        ("%Y%m%dT%H%M%S",),
+        "20260101",
+        "source_table",
+    )
+
+    assert transactions[MERCHANT].tolist() == ["shop-1", "shop-2"]
+    assert transactions["merchant_category"].tolist() == [1, 2]
+
+
+def test_load_hive_transactions_rejects_conflicting_merchant_categories() -> None:
+    source = pd.DataFrame(
+        [
+            {
+                "account_number": f"u{category}",
+                "global_flow_number": f"f{category}",
+                "storename": "same-shop",
+                "merchant_category": str(category),
+                "transaction_time": "20260101T100000",
+                "pos_longitude": "",
+                "pos_latitude": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "is_abnormal": "",
+                "dt": "20260101",
+            }
+            for category in (1, 2)
+        ]
+    )
+
+    with pytest.raises(TransactionDataError, match="同一商户对应多个商户分类"):
+        load_hive_transactions(
+            source,
+            ("%Y%m%dT%H%M%S",),
+            "20260101",
+            "source_table",
+        )
 
 
 def test_geographic_preparation_splits_same_name_far_stores() -> None:
@@ -459,6 +558,7 @@ def test_chain_like_merchants_use_candidate_community_votes() -> None:
         ),
         {"chain": {0: 0.9, 1: 0.1}},
         {"chain"},
+        set(),
         100,
         "test",
     )
@@ -467,6 +567,58 @@ def test_chain_like_merchants_use_candidate_community_votes() -> None:
     assert set(chain_rows["community_id"].astype(int)) == {0, 1}
     assert int(chain_rows["is_chain_like"].max()) == 1
     assert set(chain_rows["chain_reason"].astype(str)) == {"visit_count"}
+
+
+def test_category_two_merchant_is_non_anchor_multi_community_member() -> None:
+    graph = nx.Graph()
+    graph.add_edge("a", "b", weight=10.0, support=3)
+    graph.add_edge("c", "d", weight=10.0, support=3)
+    cleaning = CleaningResult(
+        graph=graph,
+        partition={"a": 0, "b": 0, "c": 1, "d": 1},
+        statuses={merchant_id: "active" for merchant_id in ("a", "b", "c", "d")},
+        cleaning_rounds=0,
+    )
+
+    merchants = build_merchant_results(
+        cleaning,
+        PairStatistics(
+            strengths={},
+            supports={},
+            merchant_visit_counts={"a": 5, "b": 5, "chain": 5, "c": 5, "d": 5},
+        ),
+        AnchorConfig(1, 2, 2, 1, 0.3, 0.8, 100),
+        {"chain": {0: 0.7, 1: 0.3}},
+        {"chain"},
+        {"chain"},
+        100,
+        "test",
+    )
+
+    chain_rows = merchants.loc[merchants["merchant_id"].eq("chain")]
+    assert set(chain_rows["community_id"].astype(int)) == {0, 1}
+    assert int(chain_rows["is_anchor_candidate"].sum()) == 0
+    assert set(chain_rows["chain_reason"].astype(str)) == {"merchant_category"}
+    business_results = build_business_results(
+        merchants,
+        pd.DataFrame(
+            [
+                {
+                    MERCHANT: merchant_id,
+                    REGION: "shanghai",
+                    DT: "20260101",
+                }
+                for merchant_id in ("a", "b", "chain", "c", "d")
+            ]
+        ),
+        datetime.fromisoformat("2026-01-01T10:00:00"),
+        1,
+    )
+    category_chain_rows = business_results.loc[
+        business_results["storename"].eq("chain")
+    ]
+    assert set(category_chain_rows["status"].astype(str)) == {"normal"}
+    assert int(category_chain_rows["is_position"].sum()) == 0
     assert int(chain_rows["is_multi_community_member"].max()) == 1
     assert int(chain_rows["is_anchor_candidate"].sum()) == 0
 
@@ -507,6 +659,7 @@ def test_normal_merchants_use_final_graph_community_shares() -> None:
             chain_minimum_visit_count=100,
         ),
         {},
+        set(),
         set(),
         100,
         "test",
@@ -666,60 +819,7 @@ def test_pipeline_uses_geographic_seed_and_pmi_to_join_unpositioned_merchant(
     _write_transaction_file(transaction_path, rows)
 
     output_path = tmp_path / "output"
-    config_path = tmp_path / "city.ini"
-    config_path.write_text(
-        f"""
-[city]
-code = "test-city"
-name = "test-city"
-
-[input]
-transactions_path = "{transaction_path.as_posix()}"
-timestamp_formats = %Y%m%dT%H%M%S
-
-[visits]
-merge_window_minutes = 30
-maximum_daily_merchants_per_card = 30
-
-[cooccurrence]
-window_minutes = 120
-decay_tau_minutes = 60.0
-minimum_unique_users = 1
-
-[graph]
-edge_weight_method = "transaction_count"
-context_smoothing_alpha = 0.75
-sppmi_shift = 1.0
-top_k_neighbors = 5
-minimum_z_score = 0.0
-
-[community]
-algorithm = "leiden"
-resolution = 1.0
-random_seed = 42
-maximum_cleaning_rounds = 1
-minimum_hub_degree = 10
-participation_threshold = 0.9
-
-[geo]
-cluster_radius_meters = 1000.0
-
-[anchors]
-minimum_count = 1
-maximum_count = 2
-merchants_per_anchor = 2
-minimum_community_size = 2
-maximum_participation = 0.99
-chain_visit_count_quantile = 1.0
-chain_minimum_visit_count = 100
-
-[output]
-directory = "{output_path.as_posix()}"
-""",
-        encoding="utf-8",
-    )
-
-    config = load_config(config_path)
+    config = _app_config(transaction_path, output_path, 1, 1)
     run_result = run_algorithm_one_from_transactions(
         config,
         load_transactions(config.input),
@@ -769,60 +869,7 @@ def test_pipeline_writes_intermediate_output_only(tmp_path: Path) -> None:
     _write_transaction_file(transaction_path, rows)
 
     output_path = tmp_path / "output"
-    config_path = tmp_path / "city.ini"
-    config_path.write_text(
-        f"""
-[city]
-code = "test-city"
-name = "测试市"
-
-[input]
-transactions_path = "{transaction_path.as_posix()}"
-timestamp_formats = %Y%m%dT%H%M%S
-
-[visits]
-merge_window_minutes = 30
-maximum_daily_merchants_per_card = 30
-
-[cooccurrence]
-window_minutes = 120
-decay_tau_minutes = 60.0
-minimum_unique_users = 2
-
-[graph]
-edge_weight_method = "transaction_count"
-context_smoothing_alpha = 0.75
-sppmi_shift = 1.0
-top_k_neighbors = 5
-minimum_z_score = 0.0
-
-[community]
-algorithm = "leiden"
-resolution = 1.0
-random_seed = 42
-maximum_cleaning_rounds = 2
-minimum_hub_degree = 10
-participation_threshold = 0.9
-
-[geo]
-cluster_radius_meters = 1000.0
-
-[anchors]
-minimum_count = 1
-maximum_count = 2
-merchants_per_anchor = 2
-minimum_community_size = 2
-maximum_participation = 0.99
-chain_visit_count_quantile = 1.0
-chain_minimum_visit_count = 100
-
-[output]
-directory = "{output_path.as_posix()}"
-""",
-        encoding="utf-8",
-    )
-
-    config = load_config(config_path)
+    config = _app_config(transaction_path, output_path, 2, 2)
     run_result = run_algorithm_one_from_transactions(
         config,
         load_transactions(config.input),

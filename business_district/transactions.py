@@ -16,6 +16,7 @@ REGION = "region"
 DT = "dt"
 LONGITUDE = "longitude"
 LATITUDE = "latitude"
+MERCHANT_CATEGORY = "merchant_category"
 RAW_CARD = "account_number"
 RAW_MERCHANT = "storename"
 RAW_TIMESTAMP = "transaction_time"
@@ -23,6 +24,7 @@ RAW_LONGITUDE = "pos_longitude"
 RAW_LATITUDE = "pos_latitude"
 RAW_INTERFERE = "is_interfere"
 RAW_ABNORMAL = "is_abnormal"
+RAW_MERCHANT_CATEGORY = "merchant_category"
 REQUIRED_COLUMNS = {
     RAW_CARD,
     FLOW_NUMBER,
@@ -45,8 +47,11 @@ HIVE_REQUIRED_COLUMNS = {
     REGION,
     RAW_INTERFERE,
     RAW_ABNORMAL,
+    RAW_MERCHANT_CATEGORY,
     DT,
 }
+
+CLUSTERING_MERCHANT_CATEGORIES = frozenset({1, 2})
 
 
 def _parse_timestamps(values: pd.Series, formats: tuple[str, ...]) -> pd.Series:
@@ -62,6 +67,47 @@ def _parse_timestamps(values: pd.Series, formats: tuple[str, ...]) -> pd.Series:
             errors="coerce",
         )
     return parsed
+
+
+def filter_clustering_merchant_categories(
+    dataframe: pd.DataFrame,
+    source_name: str,
+) -> pd.DataFrame:
+    if RAW_MERCHANT_CATEGORY not in dataframe.columns:
+        raise TransactionDataError(
+            "Hive 输入表缺少商户分类字段: "
+            f"table={source_name}, missing_column={RAW_MERCHANT_CATEGORY}"
+        )
+    category_text = dataframe[RAW_MERCHANT_CATEGORY].astype("string").str.strip()
+    categories = pd.to_numeric(category_text, errors="coerce")
+    invalid = categories.isna() | categories.mod(1).ne(0) | ~categories.isin({0, 1, 2, 3})
+    if invalid.any():
+        examples = category_text.loc[invalid].head(5).tolist()
+        raise TransactionDataError(
+            "Hive 输入表商户分类必须是 0、1、2 或 3: "
+            f"table={source_name}, invalid_rows={int(invalid.sum())}, examples={examples}"
+        )
+    normalized = dataframe.copy()
+    normalized[RAW_MERCHANT_CATEGORY] = categories.astype(int)
+    conflicts = (
+        normalized.groupby(RAW_MERCHANT, sort=True)[RAW_MERCHANT_CATEGORY]
+        .nunique()
+    )
+    conflicted_merchants = conflicts.loc[conflicts > 1].index.astype(str).tolist()
+    if conflicted_merchants:
+        raise TransactionDataError(
+            "Hive 输入表同一商户对应多个商户分类: "
+            f"table={source_name}, merchants={conflicted_merchants[:10]}"
+        )
+    filtered = normalized.loc[
+        normalized[RAW_MERCHANT_CATEGORY].isin(CLUSTERING_MERCHANT_CATEGORIES)
+    ].copy()
+    if filtered.empty:
+        raise TransactionDataError(
+            "Hive 输入表没有可用于聚类的线下商户交易: "
+            f"table={source_name}, allowed_categories={sorted(CLUSTERING_MERCHANT_CATEGORIES)}"
+        )
+    return filtered
 
 
 def keep_first_hive_flow_number_rows(selected: pd.DataFrame) -> pd.DataFrame:
@@ -220,6 +266,8 @@ def load_hive_transactions(
             f"table={source_name}, missing_columns={missing_columns}"
         )
 
+    source = filter_clustering_merchant_categories(source, source_name)
+
     selected = source[
         [
             RAW_CARD,
@@ -229,6 +277,7 @@ def load_hive_transactions(
             RAW_LONGITUDE,
             RAW_LATITUDE,
             REGION,
+            RAW_MERCHANT_CATEGORY,
             DT,
         ]
     ].copy()
@@ -239,6 +288,7 @@ def load_hive_transactions(
     selected[RAW_LONGITUDE] = selected[RAW_LONGITUDE].astype("string").str.strip()
     selected[RAW_LATITUDE] = selected[RAW_LATITUDE].astype("string").str.strip()
     selected[REGION] = selected[REGION].astype("string").str.strip()
+    selected[RAW_MERCHANT_CATEGORY] = selected[RAW_MERCHANT_CATEGORY].astype(int)
     selected[DT] = selected[DT].astype("string").str.strip()
 
     invalid_identifier = (
@@ -281,6 +331,7 @@ def load_hive_transactions(
             RAW_CARD: CARD,
             RAW_MERCHANT: MERCHANT,
             RAW_TIMESTAMP: TIMESTAMP,
+            RAW_MERCHANT_CATEGORY: MERCHANT_CATEGORY,
         }
     )
     result[SOURCE_MERCHANT] = result[MERCHANT]
@@ -293,6 +344,8 @@ def build_merchant_metadata(transactions: pd.DataFrame) -> pd.DataFrame:
     latest_timestamp = ordered.groupby(MERCHANT, sort=True)[TIMESTAMP].transform("max")
     latest_rows = ordered.loc[ordered[TIMESTAMP].eq(latest_timestamp)]
     metadata_columns = [MERCHANT, REGION, DT]
+    if MERCHANT_CATEGORY in latest_rows.columns:
+        metadata_columns.append(MERCHANT_CATEGORY)
     if SOURCE_MERCHANT in latest_rows.columns:
         metadata_columns.append(SOURCE_MERCHANT)
     conflicts = (
