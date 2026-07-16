@@ -167,6 +167,57 @@ def _merchant_coordinate_points(transactions: pd.DataFrame) -> Tuple[CoordinateP
     return points
 
 
+def build_merchant_coordinates(
+    transactions: pd.DataFrame,
+) -> Dict[str, CoordinatePoint]:
+    return {
+        point.item_id: point
+        for point in _merchant_coordinate_points(transactions)
+    }
+
+
+def is_suspect_online_merchant(
+    merchant_id: str,
+    graph: nx.Graph,
+    merchant_coordinates: Dict[str, CoordinatePoint],
+    minimum_neighbor_count: int,
+    distance_threshold_meters: float,
+) -> bool:
+    if minimum_neighbor_count < 2:
+        raise ValueError(
+            "疑似线上商户最少关联坐标商户数必须不小于 2: "
+            f"minimum_neighbor_count={minimum_neighbor_count}"
+        )
+    if distance_threshold_meters <= 0.0:
+        raise ValueError(
+            "疑似线上商户距离阈值必须大于 0: "
+            f"distance_threshold_meters={distance_threshold_meters}"
+        )
+    if merchant_id in merchant_coordinates or merchant_id not in graph:
+        return False
+    linked_points = tuple(
+        merchant_coordinates[str(neighbor)]
+        for neighbor in graph.neighbors(merchant_id)
+        if str(neighbor) in merchant_coordinates
+        and float(graph[merchant_id][neighbor].get("weight", 0.0)) > 0.0
+    )
+    if len(linked_points) < minimum_neighbor_count:
+        return False
+    for left_index, left in enumerate(linked_points[:-1]):
+        for right in linked_points[left_index + 1 :]:
+            if (
+                haversine_distance_meters(
+                    left.longitude,
+                    left.latitude,
+                    right.longitude,
+                    right.latitude,
+                )
+                > distance_threshold_meters
+            ):
+                return True
+    return False
+
+
 def _component_seed_pairs(
     points_by_id: Dict[str, CoordinatePoint],
     component: Tuple[str, ...],

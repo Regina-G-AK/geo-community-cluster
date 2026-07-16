@@ -28,7 +28,11 @@ from business_district.graph import (
     build_pair_statistics,
     build_sparse_graph,
 )
-from business_district.geo import CoordinatePoint, haversine_distance_meters
+from business_district.geo import (
+    CoordinatePoint,
+    haversine_distance_meters,
+    is_suspect_online_merchant,
+)
 from business_district.hive_task import (
     HiveAlgorithmParameter,
     PARAMETER_TABLE,
@@ -73,7 +77,9 @@ TARGET_TEMP_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output_incremental_tm
 RAW_BUSINESS_DISTRICT = "business_district"
 NORMAL_STATUS = "normal"
 SUSPECT_ISOLATED_STATUS = "suspect_isolated"
-SUSPECT_CROSS_REGION_STATUS = "suspect_cross_region"
+SUSPECT_ONLINE_STATUS = "suspect_online"
+# 暂停疑似跨区域判断，保留状态名供后续恢复
+# SUSPECT_CROSS_REGION_STATUS = "suspect_cross_region"
 TARGET_COLUMNS = [
     "storename",
     "community_id",
@@ -506,8 +512,7 @@ def _graph_candidate_scores(
 
 def _geographic_candidate_scores(
     candidate: HiveCandidateMerchant,
-    candidate_coordinates: Dict[str, CoordinatePoint],
-    member_coordinates: Dict[str, CoordinatePoint],
+    merchant_coordinates: Dict[str, CoordinatePoint],
     members: Dict[str, CommunityMember],
     assignment_config: AssignmentConfig,
 ) -> Dict[str, float]:
@@ -517,12 +522,12 @@ def _geographic_candidate_scores(
             f"community_assignment_distance_meters="
             f"{assignment_config.community_assignment_distance_meters}"
         )
-    candidate_point = candidate_coordinates.get(candidate.storename)
+    candidate_point = merchant_coordinates.get(candidate.storename)
     if candidate_point is None:
         return {}
     weighted_votes: Dict[str, float] = {}
     for member_name, member in members.items():
-        member_point = member_coordinates.get(member_name)
+        member_point = merchant_coordinates.get(member_name)
         if member_point is None:
             continue
         distance = haversine_distance_meters(
@@ -552,11 +557,10 @@ def _geographic_candidate_scores(
 
 def _nearest_member_distance(
     candidate: HiveCandidateMerchant,
-    candidate_coordinates: Dict[str, CoordinatePoint],
-    member_coordinates: Dict[str, CoordinatePoint],
+    merchant_coordinates: Dict[str, CoordinatePoint],
     members: Dict[str, CommunityMember],
 ) -> Optional[float]:
-    candidate_point = candidate_coordinates.get(candidate.storename)
+    candidate_point = merchant_coordinates.get(candidate.storename)
     if candidate_point is None:
         return None
     distances = [
@@ -567,7 +571,7 @@ def _nearest_member_distance(
             member_point.latitude,
         )
         for member_name in members
-        for member_point in [member_coordinates.get(member_name)]
+        for member_point in [merchant_coordinates.get(member_name)]
         if member_point is not None
     ]
     if not distances:
@@ -577,31 +581,24 @@ def _nearest_member_distance(
 
 def _geographic_status_override(
     candidate: HiveCandidateMerchant,
-    candidate_coordinates: Dict[str, CoordinatePoint],
-    member_coordinates: Dict[str, CoordinatePoint],
+    merchant_coordinates: Dict[str, CoordinatePoint],
     members: Dict[str, CommunityMember],
     assignment_config: AssignmentConfig,
 ) -> Optional[str]:
-    if assignment_config.city_maximum_distance_meters <= (
-        assignment_config.community_assignment_distance_meters
-    ):
-        raise TransactionDataError(
-            "增量归属跨区域阈值必须大于商圈地理匹配阈值: "
-            f"city_maximum_distance_meters="
-            f"{assignment_config.city_maximum_distance_meters}, "
-            f"community_assignment_distance_meters="
-            f"{assignment_config.community_assignment_distance_meters}"
-        )
+    # 暂停疑似跨区域阈值校验和状态判断，保留配置供后续恢复
+    # if assignment_config.city_maximum_distance_meters <= (
+    #     assignment_config.community_assignment_distance_meters
+    # ):
+    #     raise TransactionDataError(...)
     nearest_distance = _nearest_member_distance(
         candidate,
-        candidate_coordinates,
-        member_coordinates,
+        merchant_coordinates,
         members,
     )
     if nearest_distance is None:
         return None
-    if nearest_distance > assignment_config.city_maximum_distance_meters:
-        return SUSPECT_CROSS_REGION_STATUS
+    # if nearest_distance > assignment_config.city_maximum_distance_meters:
+    #     return SUSPECT_CROSS_REGION_STATUS
     if nearest_distance > assignment_config.community_assignment_distance_meters:
         return SUSPECT_ISOLATED_STATUS
     return None
@@ -654,7 +651,6 @@ IncrementalOutputTask = Tuple[
     nx.Graph,
     Dict[str, CommunityMember],
     Dict[str, CoordinatePoint],
-    Dict[str, CoordinatePoint],
     AssignmentConfig,
     str,
 ]
@@ -664,15 +660,36 @@ def _build_incremental_row(
     candidate: HiveCandidateMerchant,
     graph: nx.Graph,
     members: Dict[str, CommunityMember],
-    candidate_coordinates: Dict[str, CoordinatePoint],
-    member_coordinates: Dict[str, CoordinatePoint],
+    merchant_coordinates: Dict[str, CoordinatePoint],
     assignment_config: AssignmentConfig,
     timestamp: str,
 ) -> List[IncrementalOutputRow]:
+    if (
+        candidate.merchant_category != 2
+        and is_suspect_online_merchant(
+            candidate.storename,
+            graph,
+            merchant_coordinates,
+            assignment_config.minimum_online_neighbor_count,
+            assignment_config.community_assignment_distance_meters,
+        )
+    ):
+        return [
+            {
+                "storename": candidate.storename,
+                "community_id": "",
+                "previous_community_id": "",
+                "region": candidate.region,
+                "is_interfere": "N",
+                "update_time": timestamp,
+                "is_abnormal": format_status_code(SUSPECT_ONLINE_STATUS),
+                "is_position": 0,
+                "dt": candidate.dt,
+            }
+        ]
     status_override = _geographic_status_override(
         candidate,
-        candidate_coordinates,
-        member_coordinates,
+        merchant_coordinates,
         members,
         assignment_config,
     )
@@ -698,8 +715,7 @@ def _build_incremental_row(
     )
     geographic_scores = _geographic_candidate_scores(
         candidate,
-        candidate_coordinates,
-        member_coordinates,
+        merchant_coordinates,
         members,
         assignment_config,
     )
@@ -757,8 +773,7 @@ def _build_incremental_rows(task: IncrementalOutputTask) -> List[IncrementalOutp
         candidates,
         graph,
         members,
-        candidate_coordinates,
-        member_coordinates,
+        merchant_coordinates,
         assignment_config,
         timestamp,
     ) = task
@@ -769,8 +784,7 @@ def _build_incremental_rows(task: IncrementalOutputTask) -> List[IncrementalOutp
             candidate,
             graph,
             members,
-            candidate_coordinates,
-            member_coordinates,
+            merchant_coordinates,
             assignment_config,
             timestamp,
         )
@@ -781,14 +795,19 @@ def build_incremental_output(
     candidates: List[HiveCandidateMerchant],
     graph: nx.Graph,
     members: Dict[str, CommunityMember],
-    candidate_coordinates: Dict[str, CoordinatePoint],
-    member_coordinates: Dict[str, CoordinatePoint],
+    merchant_coordinates: Dict[str, CoordinatePoint],
     assignment_config: AssignmentConfig,
     update_time: datetime.datetime,
     process_count: int,
 ) -> pd.DataFrame:
     if process_count < 1:
         raise ValueError(f"进程数必须不小于 1: process_count={process_count}")
+    if assignment_config.minimum_online_neighbor_count < 2:
+        raise TransactionDataError(
+            "疑似线上商户最少关联坐标商户数必须不小于 2: "
+            f"minimum_online_neighbor_count="
+            f"{assignment_config.minimum_online_neighbor_count}"
+        )
     timestamp = update_time.strftime("%Y-%m-%d %H:%M:%S")
     chunk_count = min(len(candidates), process_count * 4)
     chunk_size = (
@@ -809,8 +828,7 @@ def build_incremental_output(
             chunk,
             graph,
             members,
-            candidate_coordinates,
-            member_coordinates,
+            merchant_coordinates,
             assignment_config,
             timestamp,
         )
@@ -936,22 +954,11 @@ class TaskMain:
                 self.dt_var,
             )
             coordinates = build_latest_merchant_coordinates(transactions)
-            candidate_coordinates = {
-                candidate.storename: coordinates[candidate.storename]
-                for candidate in candidates
-                if candidate.storename in coordinates
-            }
-            member_coordinates = {
-                storename: coordinates[storename]
-                for storename in source_state.members
-                if storename in coordinates
-            }
             target_output = build_incremental_output(
                 candidates,
                 graph,
                 source_state.members,
-                candidate_coordinates,
-                member_coordinates,
+                coordinates,
                 self.task_config.assignment_config,
                 datetime.datetime.now().astimezone(),
                 algorithm_config.runtime.process_count,

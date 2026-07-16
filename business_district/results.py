@@ -494,12 +494,13 @@ def build_business_results(
         if pd.notna(raw_status) and str(raw_status) == "suspect_online":
             status = "suspect_online"
             community_id = ""
-        elif (
-            community_id != ""
-            and is_chain_like == 1
-            and chain_reason != "merchant_category"
-        ):
-            status = "suspect_chain_store"
+        # 暂停输出疑似连锁店状态，保留字段供后续恢复判断逻辑
+        # elif (
+        #     community_id != ""
+        #     and is_chain_like == 1
+        #     and chain_reason != "merchant_category"
+        # ):
+        #     status = "suspect_chain_store"
         primary_community_id = (
             int(raw_primary_community_id)
             if community_id != ""

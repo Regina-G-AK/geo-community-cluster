@@ -9,6 +9,7 @@ import leidenalg as la
 import networkx as nx
 
 from business_district.config import CommunityConfig
+from business_district.geo import CoordinatePoint, is_suspect_online_merchant
 
 
 @dataclass(frozen=True)
@@ -16,7 +17,6 @@ class CleaningResult:
     graph: nx.Graph
     partition: Dict[str, int]
     statuses: Dict[str, str]
-    cleaning_rounds: int
 
 
 def detect_communities(
@@ -105,33 +105,28 @@ def calculate_community_weight_shares(
 def clean_graph(
     graph: nx.Graph,
     config: CommunityConfig,
+    merchant_coordinates: Dict[str, CoordinatePoint],
+    online_distance_threshold_meters: float,
 ) -> CleaningResult:
     working_graph = graph.copy()
     statuses = {
         str(node): "suspect_isolated" if graph.degree(node) == 0 else "active"
         for node in graph
     }
-    completed_rounds = 0
-
-    for round_index in range(config.maximum_cleaning_rounds):
-        partition = detect_communities(
+    suspect_online_merchants = [
+        str(node)
+        for node in working_graph
+        if is_suspect_online_merchant(
+            str(node),
             working_graph,
-            config.resolution,
-            config.random_seed,
+            merchant_coordinates,
+            config.minimum_online_neighbor_count,
+            online_distance_threshold_meters,
         )
-        participation = calculate_participation(working_graph, partition)
-        hubs = [
-            str(node)
-            for node in working_graph
-            if working_graph.degree(node) >= config.minimum_hub_degree
-            and participation[str(node)] >= config.participation_threshold
-        ]
-        if not hubs:
-            break
-        working_graph.remove_nodes_from(hubs)
-        for node in hubs:
-            statuses[node] = "suspect_online"
-        completed_rounds = round_index + 1
+    ]
+    working_graph.remove_nodes_from(suspect_online_merchants)
+    for merchant_id in suspect_online_merchants:
+        statuses[merchant_id] = "suspect_online"
 
     final_partition = detect_communities(
         working_graph,
@@ -142,5 +137,4 @@ def clean_graph(
         graph=working_graph,
         partition=final_partition,
         statuses=statuses,
-        cleaning_rounds=completed_rounds,
     )

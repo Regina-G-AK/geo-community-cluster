@@ -87,6 +87,10 @@ def _hive_partition_path(table_name: str, dt_value: str) -> Path:
     return HIVE_TABLE_ROOT / _hive_storage_table_name(table_name) / f"dt={dt_value}"
 
 
+def _prepare_hive_partition(table_name: str, dt_value: str) -> None:
+    sd.read_table(table_name, dt=[dt_value])
+
+
 def _hive_partition_part_files(
     partition_path: Path,
     table_name: str,
@@ -144,6 +148,7 @@ def read_partitioned_hive_table(
     dataframes: List[pd.DataFrame] = []
     for dt_value in dt_values:
         dt_text = str(dt_value)
+        _prepare_hive_partition(table_name, dt_text)
         partition_path = _hive_partition_path(table_name, dt_text)
         partition_dataframes: List[pd.DataFrame] = []
         for file_path in _hive_partition_part_files(
@@ -365,12 +370,15 @@ def build_runtime_config(
 def build_source_dt_list(parameters: List[HiveAlgorithmParameter]) -> List[str]:
     dates: Set[str] = set()
     for parameter in parameters:
-        for day in pd.date_range(
-            parameter.start_date.normalize(),
-            parameter.end_date.normalize(),
-            freq="D",
+        start_month = parameter.start_date.normalize().replace(day=1)
+        end_month = parameter.end_date.normalize().replace(day=1)
+        for month_start in pd.date_range(
+            start_month,
+            end_month,
+            freq="MS",
         ):
-            dates.add(pd.Timestamp(day).strftime("%Y%m%d"))
+            month_end = pd.Timestamp(month_start) + pd.offsets.MonthEnd(0)
+            dates.add(month_end.strftime("%Y%m%d"))
     return sorted(dates)
 
 
@@ -380,8 +388,6 @@ def _parse_transaction_time(
     table_name: str,
 ) -> pd.Series:
     parsed = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
-    # print_series_probe("Hive参数过滤交易时间输入", values)
-    # text_values = values.astype("string").str.strip()
     for timestamp_format in timestamp_formats:
         missing = parsed.isna()
         if not missing.any():

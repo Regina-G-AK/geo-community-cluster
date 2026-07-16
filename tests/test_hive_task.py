@@ -33,7 +33,7 @@ def _app_config(tmp_path: Path) -> AppConfig:
         visits=VisitConfig(30, 30),
         cooccurrence=CooccurrenceConfig(1, 1.0, 1),
         graph=GraphConfig("transaction_count", 0.75, 1.0, 5, 0.0),
-        community=CommunityConfig("leiden", 1.0, 42, 2, 10, 0.9),
+        community=CommunityConfig("leiden", 1.0, 42, 10),
         geo=GeoConfig(1000.0),
         anchors=AnchorConfig(1, 2, 2, 1, 0.99, 1.0, 100),
         output=OutputConfig(tmp_path / "output"),
@@ -85,6 +85,40 @@ def test_read_partitioned_hive_table_reads_part_files_and_adds_dt(
         {"storename": "a", "dt": "20260101"},
         {"storename": "b", "dt": "20260101"},
         {"storename": "c", "dt": "20260102"},
+    ]
+
+
+def test_read_partitioned_hive_table_prepares_partition_before_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("business_district.hive_task")
+    monkeypatch.setattr(hive_task, "HIVE_TABLE_ROOT", tmp_path)
+    read_calls: list[tuple[str, list[str]]] = []
+
+    def read_table(table_name: str, dt: list[str]) -> pd.DataFrame:
+        read_calls.append((table_name, dt))
+        partition = tmp_path / "input_table" / f"dt={dt[0]}"
+        partition.mkdir(parents=True)
+        pd.DataFrame([{"storename": "mounted"}]).to_parquet(
+            partition / "part-000.parquet",
+            index=False,
+        )
+        return pd.DataFrame()
+
+    monkeypatch.setattr(hive_task.sd, "read_table", read_table)
+
+    result = hive_task.read_partitioned_hive_table(
+        "dev_icamp.input_table",
+        ["20260101"],
+    )
+
+    assert read_calls == [
+        ("dev_icamp.input_table", ["20260101"]),
+    ]
+    assert result.to_dict(orient="records") == [
+        {"storename": "mounted", "dt": "20260101"},
     ]
 
 
@@ -391,7 +425,7 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
     summary = hive_task.TaskMain(task_config).taskrun()
 
     assert reads == [("param_table", ["20260101"])]
-    assert partition_reads == [("source_table", ["20260101"])]
+    assert partition_reads == [("source_table", ["20260131"])]
     assert writes == [("20260101", ["20260101"])]
     assert summary.input_rows == 1
 
@@ -488,7 +522,38 @@ def test_filter_source_data_by_parameters_uses_region_and_date(
     )
 
     assert filtered["storename"].tolist() == ["in-range"]
-    assert hive_task.build_source_dt_list(parameters) == ["20260101", "20260102"]
+    assert hive_task.build_source_dt_list(parameters) == ["20260131"]
+
+
+def test_build_source_dt_list_uses_each_month_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("business_district.hive_task")
+    parameter_data = pd.DataFrame(
+        [
+            {
+                "start_date": "20260115",
+                "end_date": "20260302",
+                "region": "shanghai",
+                "max_transaction_time_interval": "120",
+                "min_transaction_number": "3",
+                "min_merchant_count": "3",
+                "is_daily": "0",
+            }
+        ]
+    )
+
+    parameters = hive_task.load_hive_algorithm_parameters(
+        parameter_data,
+        "param_table",
+    )
+
+    assert hive_task.build_source_dt_list(parameters) == [
+        "20260131",
+        "20260228",
+        "20260331",
+    ]
 
 
 def test_hive_parameters_reject_non_numeric_is_daily(

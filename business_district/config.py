@@ -46,9 +46,7 @@ class CommunityConfig:
     algorithm: str
     resolution: float
     random_seed: int
-    maximum_cleaning_rounds: int
-    minimum_hub_degree: int
-    participation_threshold: float
+    minimum_online_neighbor_count: int
 
 
 @dataclass(frozen=True)
@@ -134,12 +132,8 @@ def validate_app_config(config: AppConfig) -> AppConfig:
         raise ConfigurationError("社区分辨率必须大于 0")
     if config.community.random_seed < 0:
         raise ConfigurationError("随机种子必须不小于 0")
-    if config.community.maximum_cleaning_rounds < 1:
-        raise ConfigurationError("最大清洗轮数必须不小于 1")
-    if config.community.minimum_hub_degree < 1:
-        raise ConfigurationError("最小 hub 度数必须不小于 1")
-    if not 0.0 <= config.community.participation_threshold <= 1.0:
-        raise ConfigurationError("参与系数阈值必须位于 0 到 1 之间")
+    if config.community.minimum_online_neighbor_count < 2:
+        raise ConfigurationError("疑似线上商户最少关联坐标商户数必须不小于 2")
     if config.geo.cluster_radius_meters <= 0.0:
         raise ConfigurationError("地理聚类半径必须大于 0")
     if config.anchors.minimum_count < 1:

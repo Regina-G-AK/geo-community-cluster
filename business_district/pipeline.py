@@ -9,6 +9,7 @@ from business_district.community import CleaningResult, clean_graph
 from business_district.config import AppConfig
 from business_district.geo import (
     add_geographic_seed_edges,
+    build_merchant_coordinates,
     prepare_geographic_transactions,
 )
 from business_district.graph import (
@@ -26,9 +27,7 @@ from business_district.results import (
     build_business_results,
     build_community_results,
     build_merchant_results,
-    calculate_chain_visit_count_threshold,
     filter_merchants_by_community_size,
-    identify_chain_like_merchants,
 )
 # 线上任务暂不启用资源监测
 # from business_district.resource_usage import record_resource_phase
@@ -71,6 +70,7 @@ def run_algorithm_one_from_transactions(
     )
     # record_resource_phase("地理种子准备")
     prepared_transactions = geographic_preparation.transactions
+    merchant_coordinates = build_merchant_coordinates(prepared_transactions)
     merchant_metadata = build_merchant_metadata(prepared_transactions)
     # record_resource_phase("商户元数据构建")
     visits = merge_visits(prepared_transactions, config.visits)
@@ -97,29 +97,27 @@ def run_algorithm_one_from_transactions(
         geographic_preparation.seed_pairs,
     )
     # record_resource_phase("地理种子边合并")
-    chain_visit_count_threshold = calculate_chain_visit_count_threshold(
-        [
-            int(visit_count)
-            for visit_count in statistics.merchant_visit_counts.values()
-        ],
-        config.anchors,
-    )
-    chain_like_merchant_ids = identify_chain_like_merchants(
-        statistics.merchant_visit_counts,
-        chain_visit_count_threshold,
-    )
+    # 暂停按访问量识别疑似连锁商户，保留原配置和实现供后续恢复
+    # chain_visit_count_threshold = calculate_chain_visit_count_threshold(...)
+    # chain_like_merchant_ids = identify_chain_like_merchants(...)
+    chain_visit_count_threshold = 0
     category_chain_merchant_ids = set(
         prepared_transactions.loc[
             prepared_transactions[MERCHANT_CATEGORY].eq(2),
             MERCHANT,
         ].astype(str)
     ) if MERCHANT_CATEGORY in prepared_transactions.columns else set()
-    chain_like_merchant_ids.update(category_chain_merchant_ids)
+    chain_like_merchant_ids = set(category_chain_merchant_ids)
     # record_resource_phase("连锁商户识别")
     clustering_graph = graph.copy()
     clustering_graph.remove_nodes_from(chain_like_merchant_ids)
     # record_resource_phase("聚类图准备")
-    cleaning: CleaningResult = clean_graph(clustering_graph, config.community)
+    cleaning: CleaningResult = clean_graph(
+        clustering_graph,
+        config.community,
+        merchant_coordinates,
+        config.geo.cluster_radius_meters,
+    )
     # record_resource_phase("社区清洗")
     edge_candidates = calculate_edge_candidates(
         statistics,

@@ -94,9 +94,7 @@ def build_algorithm_config(
             algorithm="leiden",
             resolution=1.0,
             random_seed=42,
-            maximum_cleaning_rounds=3,
-            minimum_hub_degree=30,
-            participation_threshold=0.80,
+            minimum_online_neighbor_count=30,
         ),
         geo=GeoConfig(cluster_radius_meters=1000.0),
         anchors=AnchorConfig(
@@ -116,6 +114,7 @@ def build_algorithm_config(
 def build_assignment_config() -> AssignmentConfig:
     return AssignmentConfig(
         top_k_neighbors=15,
+        minimum_online_neighbor_count=30,
         theta=0.55,
         delta=0.10,
         graph_weight=0.6,

@@ -35,7 +35,7 @@ def _app_config(output_directory: Path) -> AppConfig:
         visits=VisitConfig(30, 30),
         cooccurrence=CooccurrenceConfig(1, 1.0, 1),
         graph=GraphConfig("transaction_count", 0.75, 1.0, 10, 0.0),
-        community=CommunityConfig("leiden", 1.0, 42, 1, 10, 0.9),
+        community=CommunityConfig("leiden", 1.0, 42, 10),
         geo=GeoConfig(1000.0),
         anchors=AnchorConfig(1, 2, 2, 1, 0.99, 1.0, 100),
         output=OutputConfig(output_directory),
@@ -115,6 +115,7 @@ def _config(
 ) -> AssignmentConfig:
     return AssignmentConfig(
         top_k_neighbors=15,
+        minimum_online_neighbor_count=2,
         theta=0.55,
         delta=0.10,
         graph_weight=0.6,
@@ -164,7 +165,6 @@ def test_incremental_output_uses_graph_vote_and_marks_unassigned(
         graph,
         members,
         {},
-        {},
         _config(3000.0, 50000.0),
         datetime.fromisoformat("2026-01-01T10:00:00"),
         1,
@@ -200,8 +200,10 @@ def test_category_two_candidate_can_join_multiple_communities(
         ],
         graph,
         members,
-        {},
-        {},
+        {
+            "member-a": hive_task.CoordinatePoint("member-a", 121.0, 31.0),
+            "member-b": hive_task.CoordinatePoint("member-b", 121.05, 31.0),
+        },
         _config(3000.0, 50000.0),
         datetime.fromisoformat("2026-01-01T10:00:00"),
         1,
@@ -210,6 +212,43 @@ def test_category_two_candidate_can_join_multiple_communities(
     assert output["community_id"].tolist() == ["1", "2"]
     assert output["is_position"].tolist() == [0, 0]
     assert output["is_abnormal"].tolist() == ["1", "1"]
+
+
+def test_coordinate_missing_candidate_linked_to_distant_merchants_is_online(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    members = {
+        "member-a": hive_task.CommunityMember("member-a", "1", False),
+        "member-b": hive_task.CommunityMember("member-b", "2", False),
+    }
+    graph = nx.Graph()
+    graph.add_edge("online-shop", "member-a", weight=1.0)
+    graph.add_edge("online-shop", "member-b", weight=3.0)
+
+    output = hive_task.build_incremental_output(
+        [
+            hive_task.HiveCandidateMerchant(
+                storename="online-shop",
+                region="shanghai",
+                dt="20260101",
+                merchant_category=1,
+            )
+        ],
+        graph,
+        members,
+        {
+            "member-a": hive_task.CoordinatePoint("member-a", 121.0, 31.0),
+            "member-b": hive_task.CoordinatePoint("member-b", 121.05, 31.0),
+        },
+        _config(3000.0, 50000.0),
+        datetime.fromisoformat("2026-01-01T10:00:00"),
+        1,
+    )
+
+    assert output.loc[0, "community_id"] == ""
+    assert output.loc[0, "is_abnormal"] == "2"
 
 
 def test_incremental_output_uses_geographic_vote_without_graph_edges(
@@ -229,14 +268,12 @@ def test_incremental_output_uses_geographic_vote_without_graph_edges(
             is_anchor=False,
         ),
     }
-    candidate_coordinates = {
+    merchant_coordinates = {
         "new-shop": hive_task.CoordinatePoint(
             item_id="new-shop",
             longitude=121.0001,
             latitude=31.0001,
-        )
-    }
-    member_coordinates = {
+        ),
         "near-member": hive_task.CoordinatePoint(
             item_id="near-member",
             longitude=121.0002,
@@ -260,8 +297,7 @@ def test_incremental_output_uses_geographic_vote_without_graph_edges(
         ],
         nx.Graph(),
         members,
-        candidate_coordinates,
-        member_coordinates,
+        merchant_coordinates,
         _config(3000.0, 50000.0),
         datetime.fromisoformat("2026-01-01T10:00:00"),
         1,
@@ -271,7 +307,7 @@ def test_incremental_output_uses_geographic_vote_without_graph_edges(
     assert output.loc[0, "is_abnormal"] == "1"
 
 
-def test_coordinate_candidate_far_from_city_skips_graph_vote_as_cross_region(
+def test_coordinate_candidate_far_from_city_is_marked_isolated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
@@ -302,14 +338,12 @@ def test_coordinate_candidate_far_from_city_skips_graph_vote_as_cross_region(
                 item_id="new-shop",
                 longitude=122.0,
                 latitude=32.0,
-            )
-        },
-        {
+            ),
             "member-a": hive_task.CoordinatePoint(
                 item_id="member-a",
                 longitude=121.0,
                 latitude=31.0,
-            )
+            ),
         },
         _config(3000.0, 50000.0),
         datetime.fromisoformat("2026-01-01T10:00:00"),
@@ -317,7 +351,7 @@ def test_coordinate_candidate_far_from_city_skips_graph_vote_as_cross_region(
     )
 
     assert output.loc[0, "community_id"] == ""
-    assert output.loc[0, "is_abnormal"] == "5"
+    assert output.loc[0, "is_abnormal"] == "3"
 
 
 def test_coordinate_candidate_outside_community_distance_skips_graph_vote(
@@ -351,14 +385,12 @@ def test_coordinate_candidate_outside_community_distance_skips_graph_vote(
                 item_id="new-shop",
                 longitude=121.05,
                 latitude=31.0,
-            )
-        },
-        {
+            ),
             "member-a": hive_task.CoordinatePoint(
                 item_id="member-a",
                 longitude=121.0,
                 latitude=31.0,
-            )
+            ),
         },
         _config(3000.0, 50000.0),
         datetime.fromisoformat("2026-01-01T10:00:00"),
@@ -423,7 +455,7 @@ def test_incremental_cooccurrence_config_uses_notebook_decay_tau(
     assert config.window_minutes == 90
     assert config.decay_tau_minutes == 12.5
     assert config.minimum_unique_users == 4
-    assert hive_task.build_source_dt_list(parameters) == ["20260101", "20260102"]
+    assert hive_task.build_source_dt_list(parameters) == ["20260131"]
 
 
 def test_merge_pair_statistics_keeps_existing_support_and_adds_visits(
@@ -568,7 +600,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
     summary = hive_task.TaskMain(config).taskrun()
 
     assert ("param_table", ["20260101"]) in fake_sd.reads
-    assert ("source_table", ["20260101", "20260102"]) in fake_sd.reads
+    assert ("source_table", ["20260131"]) in fake_sd.reads
     assert summary.source_rows == 2
     assert summary.community_rows == 1
     assert summary.inserted_rows == 1

@@ -9,7 +9,7 @@ import networkx as nx
 import pandas as pd
 import pytest
 
-from business_district.community import CleaningResult, detect_communities
+from business_district.community import CleaningResult, clean_graph, detect_communities
 from business_district.config import (
     AnchorConfig,
     AppConfig,
@@ -24,7 +24,7 @@ from business_district.config import (
     VisitConfig,
 )
 from business_district.errors import TransactionDataError
-from business_district.geo import prepare_geographic_transactions
+from business_district.geo import CoordinatePoint, prepare_geographic_transactions
 from business_district.graph import (
     PairStatistics,
     _calculate_sppmi_candidates,
@@ -91,7 +91,6 @@ def _app_config(
     transaction_path: Path,
     output_path: Path,
     minimum_unique_users: int,
-    maximum_cleaning_rounds: int,
 ) -> AppConfig:
     return AppConfig(
         city=CityConfig(code="test-city", name="测试市"),
@@ -119,9 +118,7 @@ def _app_config(
             algorithm="leiden",
             resolution=1.0,
             random_seed=42,
-            maximum_cleaning_rounds=maximum_cleaning_rounds,
-            minimum_hub_degree=10,
-            participation_threshold=0.9,
+            minimum_online_neighbor_count=2,
         ),
         geo=GeoConfig(cluster_radius_meters=1000.0),
         anchors=AnchorConfig(
@@ -130,8 +127,8 @@ def _app_config(
             merchants_per_anchor=2,
             minimum_community_size=2,
             maximum_participation=0.99,
-            chain_visit_count_quantile=1.0,
-            chain_minimum_visit_count=100,
+            chain_visit_count_quantile=0.0,
+            chain_minimum_visit_count=1,
         ),
         output=OutputConfig(directory=output_path),
         runtime=RuntimeConfig(process_count=2),
@@ -526,6 +523,53 @@ def test_transaction_count_graph_uses_supported_pair_strength() -> None:
     assert "z_score" not in graph.edges["a", "b"]
 
 
+def test_clean_graph_marks_coordinate_missing_merchant_linked_to_distant_merchants(
+) -> None:
+    graph = nx.Graph()
+    graph.add_edge("online-shop", "near-shop", weight=3.0)
+    graph.add_edge("online-shop", "far-shop", weight=2.0)
+    coordinates = {
+        "near-shop": CoordinatePoint("near-shop", 121.0, 31.0),
+        "far-shop": CoordinatePoint("far-shop", 121.05, 31.0),
+    }
+
+    cleaning = clean_graph(
+        graph,
+        CommunityConfig("leiden", 1.0, 42, 2),
+        coordinates,
+        1000.0,
+    )
+
+    assert cleaning.statuses["online-shop"] == "suspect_online"
+    assert "online-shop" not in cleaning.graph
+
+
+def test_clean_graph_keeps_positioned_or_geographically_concentrated_merchants(
+) -> None:
+    graph = nx.Graph()
+    graph.add_edge("positioned-shop", "near-shop", weight=3.0)
+    graph.add_edge("positioned-shop", "far-shop", weight=2.0)
+    graph.add_edge("local-shop", "near-shop", weight=3.0)
+    graph.add_edge("local-shop", "local-neighbor", weight=2.0)
+    coordinates = {
+        "positioned-shop": CoordinatePoint("positioned-shop", 121.02, 31.0),
+        "near-shop": CoordinatePoint("near-shop", 121.0, 31.0),
+        "far-shop": CoordinatePoint("far-shop", 121.05, 31.0),
+        "local-neighbor": CoordinatePoint("local-neighbor", 121.001, 31.0),
+    }
+
+    cleaning = clean_graph(
+        graph,
+        CommunityConfig("leiden", 1.0, 42, 2),
+        coordinates,
+        1000.0,
+    )
+
+    assert cleaning.statuses["positioned-shop"] == "active"
+    assert cleaning.statuses["local-shop"] == "active"
+    assert {"positioned-shop", "local-shop"}.issubset(cleaning.graph)
+
+
 def test_chain_like_merchants_use_candidate_community_votes() -> None:
     graph = nx.Graph()
     graph.add_edge("a", "b", weight=10.0, support=3)
@@ -539,7 +583,6 @@ def test_chain_like_merchants_use_candidate_community_votes() -> None:
             "c": "active",
             "d": "active",
         },
-        cleaning_rounds=0,
     )
 
     merchants = build_merchant_results(
@@ -579,7 +622,6 @@ def test_category_two_merchant_is_non_anchor_multi_community_member() -> None:
         graph=graph,
         partition={"a": 0, "b": 0, "c": 1, "d": 1},
         statuses={merchant_id: "active" for merchant_id in ("a", "b", "c", "d")},
-        cleaning_rounds=0,
     )
 
     merchants = build_merchant_results(
@@ -641,7 +683,6 @@ def test_normal_merchants_use_final_graph_community_shares() -> None:
             "c": "active",
             "d": "active",
         },
-        cleaning_rounds=0,
     )
 
     merchants = build_merchant_results(
@@ -674,7 +715,7 @@ def test_normal_merchants_use_final_graph_community_shares() -> None:
     assert int(bridge_rows["is_multi_community_member"].max()) == 1
 
 
-def test_business_results_use_configured_minimum_community_size() -> None:
+def test_business_results_do_not_mark_suspect_chain_store() -> None:
     merchants = pd.DataFrame(
         [
             {
@@ -741,7 +782,7 @@ def test_business_results_use_configured_minimum_community_size() -> None:
     merchant_a = result.loc[result["storename"].eq("a")].iloc[0]
     merchant_b = result.loc[result["storename"].eq("b")].iloc[0]
     assert merchant_a["status"] == "normal"
-    assert merchant_b["status"] == "suspect_chain_store"
+    assert merchant_b["status"] == "normal"
     assert set(valid_rows["community_id"].astype(int)) == {0}
     assert invalid_row["status"] == "suspect_isolated"
     assert invalid_row["community_id"] == ""
@@ -822,7 +863,7 @@ def test_pipeline_uses_geographic_seed_and_pmi_to_join_unpositioned_merchant(
     _write_transaction_file(transaction_path, rows)
 
     output_path = tmp_path / "output"
-    config = _app_config(transaction_path, output_path, 1, 1)
+    config = _app_config(transaction_path, output_path, 1)
     run_result = run_algorithm_one_from_transactions(
         config,
         load_transactions(config.input),
@@ -872,7 +913,7 @@ def test_pipeline_writes_intermediate_output_only(tmp_path: Path) -> None:
     _write_transaction_file(transaction_path, rows)
 
     output_path = tmp_path / "output"
-    config = _app_config(transaction_path, output_path, 2, 2)
+    config = _app_config(transaction_path, output_path, 2)
     run_result = run_algorithm_one_from_transactions(
         config,
         load_transactions(config.input),
@@ -924,7 +965,7 @@ def test_pipeline_writes_intermediate_output_only(tmp_path: Path) -> None:
     assert merchant_a["is_chain_like"] == 0
     assert merchant_a["is_primary_community"] == 1
     assert merchant_a["community_share"] == 1.0
-    assert merchant_a["chain_visit_count_threshold"] == 100
+    assert merchant_a["chain_visit_count_threshold"] == 0
 
     with (output_directory / "pair_statistics_test-city.pkl").open("rb") as file:
         pair_statistics = pickle.load(file)
