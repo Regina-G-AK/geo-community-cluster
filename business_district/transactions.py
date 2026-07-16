@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Dict, List, Tuple
 
 import pandas as pd
 
 from business_district.config import InputConfig, VisitConfig
 from business_district.errors import TransactionDataError
+from business_district.probes import print_dataframe_probe, print_probe, print_series_probe
 
 CARD = "card_id"
 MERCHANT = "merchant_id"
@@ -54,15 +56,15 @@ HIVE_REQUIRED_COLUMNS = {
 CLUSTERING_MERCHANT_CATEGORIES = frozenset({1, 2})
 
 
-def _parse_timestamps(values: pd.Series, formats: tuple[str, ...]) -> pd.Series:
+def _parse_timestamps(values: pd.Series, formats: Tuple[str, ...]) -> pd.Series:
     parsed = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
-    text_values = values.astype("string").str.strip()
+    # text_values = values.astype("string").str.strip()
     for timestamp_format in formats:
         missing = parsed.isna()
         if not missing.any():
             break
         parsed.loc[missing] = pd.to_datetime(
-            text_values.loc[missing],
+            values.loc[missing],
             format=timestamp_format,
             errors="coerce",
         )
@@ -78,7 +80,12 @@ def filter_clustering_merchant_categories(
             "Hive 输入表缺少商户分类字段: "
             f"table={source_name}, missing_column={RAW_MERCHANT_CATEGORY}"
         )
+    # print_series_probe(
+    #     "Hive商户分类清理开始",
+    #     dataframe[RAW_MERCHANT_CATEGORY],
+    # )
     category_text = dataframe[RAW_MERCHANT_CATEGORY].astype("string").str.strip()
+    # print_series_probe("Hive商户分类清理完成", category_text)
     categories = pd.to_numeric(category_text, errors="coerce")
     invalid = categories.isna() | categories.mod(1).ne(0) | ~categories.isin({0, 1, 2, 3})
     if invalid.any():
@@ -116,8 +123,8 @@ def keep_first_hive_flow_number_rows(selected: pd.DataFrame) -> pd.DataFrame:
 
 
 def _parse_coordinates(selected: pd.DataFrame) -> pd.DataFrame:
-    longitude_text = selected[RAW_LONGITUDE].astype("string").str.strip()
-    latitude_text = selected[RAW_LATITUDE].astype("string").str.strip()
+    longitude_text = selected[RAW_LONGITUDE]
+    latitude_text = selected[RAW_LATITUDE]
     longitude_empty = longitude_text.isna() | longitude_text.eq("")
     latitude_empty = latitude_text.isna() | latitude_text.eq("")
     partial_coordinate = longitude_empty != latitude_empty
@@ -165,7 +172,7 @@ def load_transactions(config: InputConfig) -> pd.DataFrame:
             f"path={path}, required_columns={sorted(REQUIRED_COLUMNS)}, reason={error}"
         ) from error
 
-    source.columns = source.columns.astype("string").str.strip()
+    # source.columns = source.columns.astype("string").str.strip()
     missing_columns = sorted(REQUIRED_COLUMNS.difference(set(source.columns)))
     if missing_columns:
         raise TransactionDataError(
@@ -251,12 +258,15 @@ def load_transactions(config: InputConfig) -> pd.DataFrame:
 
 def load_hive_transactions(
     dataframe: pd.DataFrame,
-    timestamp_formats: tuple[str, ...],
+    timestamp_formats: Tuple[str, ...],
     dt_value: str,
     source_name: str,
 ) -> pd.DataFrame:
+    # print_dataframe_probe("Hive交易加载输入", dataframe)
     source = dataframe.copy()
-    source.columns = source.columns.astype("string").str.strip()
+    # print_probe("Hive交易列名清理开始", f"columns_type={type(source.columns).__name__}")
+    # source.columns = source.columns.astype("string").str.strip()
+    # print_dataframe_probe("Hive交易列名清理完成", source)
     if DT not in source.columns:
         source[DT] = dt_value
     missing_columns = sorted(HIVE_REQUIRED_COLUMNS.difference(set(source.columns)))
@@ -266,7 +276,9 @@ def load_hive_transactions(
             f"table={source_name}, missing_columns={missing_columns}"
         )
 
+    # print_probe("Hive商户分类过滤开始", f"row_count={len(source)}")
     source = filter_clustering_merchant_categories(source, source_name)
+    # print_dataframe_probe("Hive商户分类过滤完成", source)
 
     selected = source[
         [
@@ -281,15 +293,34 @@ def load_hive_transactions(
             DT,
         ]
     ].copy()
+    # print_probe("Hive交易字段清理开始", f"columns={selected.columns.tolist()!r}")
+    # print_series_probe("Hive卡号清理开始", selected[RAW_CARD])
     selected[RAW_CARD] = selected[RAW_CARD].astype("string").str.strip()
+    # print_series_probe("Hive卡号清理完成", selected[RAW_CARD])
+    # print_series_probe("Hive流水号清理开始", selected[FLOW_NUMBER])
     selected[FLOW_NUMBER] = selected[FLOW_NUMBER].astype("string").str.strip()
+    # print_series_probe("Hive流水号清理完成", selected[FLOW_NUMBER])
+    # print_series_probe("Hive商户名清理开始", selected[RAW_MERCHANT])
     selected[RAW_MERCHANT] = selected[RAW_MERCHANT].astype("string").str.strip()
+    # print_series_probe("Hive商户名清理完成", selected[RAW_MERCHANT])
+    # print_series_probe("Hive交易时间字段清理开始", selected[RAW_TIMESTAMP])
     selected[RAW_TIMESTAMP] = selected[RAW_TIMESTAMP].astype("string").str.strip()
+    # print_series_probe("Hive交易时间字段清理完成", selected[RAW_TIMESTAMP])
+    # print_series_probe("Hive经度清理开始", selected[RAW_LONGITUDE])
     selected[RAW_LONGITUDE] = selected[RAW_LONGITUDE].astype("string").str.strip()
+    # print_series_probe("Hive经度清理完成", selected[RAW_LONGITUDE])
+    # print_series_probe("Hive纬度清理开始", selected[RAW_LATITUDE])
     selected[RAW_LATITUDE] = selected[RAW_LATITUDE].astype("string").str.strip()
+    # print_series_probe("Hive纬度清理完成", selected[RAW_LATITUDE])
+    # print_series_probe("Hive地区清理开始", selected[REGION])
     selected[REGION] = selected[REGION].astype("string").str.strip()
+    # print_series_probe("Hive地区清理完成", selected[REGION])
+    # print_series_probe("Hive商户分类整数转换开始", selected[RAW_MERCHANT_CATEGORY])
     selected[RAW_MERCHANT_CATEGORY] = selected[RAW_MERCHANT_CATEGORY].astype(int)
-    selected[DT] = selected[DT].astype("string").str.strip()
+    # print_series_probe("Hive商户分类整数转换完成", selected[RAW_MERCHANT_CATEGORY])
+    # print_series_probe("Hive分区日期清理开始", selected[DT])
+    selected[DT] = selected[DT].str.strip()
+    # print_series_probe("Hive分区日期清理完成", selected[DT])
 
     invalid_identifier = (
         selected[RAW_CARD].isna()
@@ -310,13 +341,17 @@ def load_hive_transactions(
             f"table={source_name}, invalid_rows={int(invalid_identifier.sum())}, examples={examples}"
         )
 
+    # print_probe("Hive坐标解析开始", f"row_count={len(selected)}")
     selected = _parse_coordinates(selected)
+    # print_dataframe_probe("Hive坐标解析完成", selected)
     selected = keep_first_hive_flow_number_rows(selected)
 
+    print_probe("Hive交易时间解析开始", f"row_count={len(selected)}")
     parsed_timestamps = _parse_timestamps(
         selected[RAW_TIMESTAMP],
         timestamp_formats,
     )
+    # print_series_probe("Hive交易时间解析完成", parsed_timestamps)
     invalid_timestamp = parsed_timestamps.isna()
     if invalid_timestamp.any():
         examples = selected.loc[invalid_timestamp, RAW_TIMESTAMP].head(5).tolist()
@@ -336,7 +371,9 @@ def load_hive_transactions(
     )
     result[SOURCE_MERCHANT] = result[MERCHANT]
     result[TIMESTAMP] = parsed_timestamps
-    return result.sort_values([CARD, TIMESTAMP, MERCHANT]).reset_index(drop=True)
+    ordered = result.sort_values([CARD, TIMESTAMP, MERCHANT]).reset_index(drop=True)
+    # print_dataframe_probe("Hive交易加载完成", ordered)
+    return ordered
 
 
 def build_merchant_metadata(transactions: pd.DataFrame) -> pd.DataFrame:
@@ -368,10 +405,10 @@ def build_merchant_metadata(transactions: pd.DataFrame) -> pd.DataFrame:
 
 def merge_visits(transactions: pd.DataFrame, config: VisitConfig) -> pd.DataFrame:
     merge_window = pd.Timedelta(minutes=config.merge_window_minutes)
-    visit_rows: list[tuple[str, str, pd.Timestamp]] = []
+    visit_rows: List[Tuple[str, str, pd.Timestamp]] = []
 
     for card_id, group in transactions.groupby(CARD, sort=False):
-        last_timestamp_by_merchant: dict[str, pd.Timestamp] = {}
+        last_timestamp_by_merchant: Dict[str, pd.Timestamp] = {}
         for row in group.itertuples(index=False):
             merchant_id = str(getattr(row, MERCHANT))
             timestamp = pd.Timestamp(getattr(row, TIMESTAMP))

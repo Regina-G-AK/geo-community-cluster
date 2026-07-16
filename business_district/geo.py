@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Dict, List, Tuple
 
 import networkx as nx
 import pandas as pd
@@ -29,7 +30,7 @@ class GeographicSummary:
 @dataclass(frozen=True)
 class GeographicPreparation:
     transactions: pd.DataFrame
-    seed_pairs: tuple[tuple[str, str], ...]
+    seed_pairs: Tuple[Tuple[str, str], ...]
     summary: GeographicSummary
 
 
@@ -64,9 +65,9 @@ def _coordinate_mask(dataframe: pd.DataFrame) -> pd.Series:
 
 
 def _coordinate_components(
-    points: tuple[CoordinatePoint, ...],
+    points: Tuple[CoordinatePoint, ...],
     radius_meters: float,
-) -> tuple[tuple[str, ...], ...]:
+) -> Tuple[Tuple[str, ...], ...]:
     graph = nx.Graph()
     graph.add_nodes_from(point.item_id for point in points)
     for left_index, left in enumerate(points[:-1]):
@@ -106,7 +107,7 @@ def split_geographic_entities(
     result[MERCHANT] = result[MERCHANT].astype(str)
     result[SOURCE_MERCHANT] = result[SOURCE_MERCHANT].astype(str)
     existing_merchants = set(result[MERCHANT].astype(str))
-    entity_ids_by_row: dict[int, str] = {}
+    entity_ids_by_row: Dict[int, str] = {}
 
     for source_merchant_id, group in source.groupby(SOURCE_MERCHANT, sort=True):
         positioned = group.loc[_coordinate_mask(group)]
@@ -150,7 +151,7 @@ def split_geographic_entities(
     return result.sort_values([MERCHANT]).reset_index(drop=True)
 
 
-def _merchant_coordinate_points(transactions: pd.DataFrame) -> tuple[CoordinatePoint, ...]:
+def _merchant_coordinate_points(transactions: pd.DataFrame) -> Tuple[CoordinatePoint, ...]:
     positioned = transactions.loc[_coordinate_mask(transactions)]
     if positioned.empty:
         return tuple()
@@ -167,11 +168,11 @@ def _merchant_coordinate_points(transactions: pd.DataFrame) -> tuple[CoordinateP
 
 
 def _component_seed_pairs(
-    points_by_id: dict[str, CoordinatePoint],
-    component: tuple[str, ...],
+    points_by_id: Dict[str, CoordinatePoint],
+    component: Tuple[str, ...],
     radius_meters: float,
-) -> tuple[tuple[str, str], ...]:
-    pairs: list[tuple[str, str]] = []
+) -> Tuple[Tuple[str, str], ...]:
+    pairs: List[Tuple[str, str]] = []
     for left_index, left_id in enumerate(component[:-1]):
         left = points_by_id[left_id]
         for right_id in component[left_index + 1 :]:
@@ -190,13 +191,13 @@ def _component_seed_pairs(
 def build_geographic_seed_pairs(
     transactions: pd.DataFrame,
     radius_meters: float,
-) -> tuple[tuple[tuple[str, str], ...], int, int]:
+) -> Tuple[Tuple[Tuple[str, str], ...], int, int]:
     points = _merchant_coordinate_points(transactions)
     if not points:
         return tuple(), 0, 0
     components = _coordinate_components(points, radius_meters)
     points_by_id = {point.item_id: point for point in points}
-    seed_pairs: list[tuple[str, str]] = []
+    seed_pairs: List[Tuple[str, str]] = []
     seed_cluster_count = 0
     for component in components:
         if len(component) < 2:
@@ -210,7 +211,7 @@ def build_geographic_seed_pairs(
 
 def add_geographic_seed_edges(
     graph: nx.Graph,
-    seed_pairs: tuple[tuple[str, str], ...],
+    seed_pairs: Tuple[Tuple[str, str], ...],
 ) -> nx.Graph:
     seeded_graph = graph.copy()
     if not seed_pairs:

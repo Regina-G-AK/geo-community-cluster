@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import importlib
 from pathlib import Path
 import sys
@@ -86,6 +88,62 @@ def test_read_partitioned_hive_table_reads_part_files_and_adds_dt(
     ]
 
 
+def test_read_partitioned_hive_table_skips_missing_and_empty_partitions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("business_district.hive_task")
+    monkeypatch.setattr(hive_task, "HIVE_TABLE_ROOT", tmp_path)
+    empty_partition = tmp_path / "input_table" / "dt=20260102"
+    valid_partition = tmp_path / "input_table" / "dt=20260103"
+    empty_partition.mkdir(parents=True)
+    valid_partition.mkdir(parents=True)
+    pd.DataFrame(columns=["storename"]).to_parquet(
+        empty_partition / "part-000.parquet",
+        index=False,
+    )
+    pd.DataFrame(
+        [{"storename": "available", "dt": pd.Timestamp("1999-01-01")}]
+    ).to_parquet(
+        valid_partition / "part-000.parquet",
+        index=False,
+    )
+
+    result = hive_task.read_partitioned_hive_table(
+        "dev_icamp.input_table",
+        ["20260101", "20260102", "20260103"],
+    )
+
+    assert result.to_dict(orient="records") == [
+        {"storename": "available", "dt": "20260103"},
+    ]
+
+
+def test_read_partitioned_hive_table_rejects_all_empty_partitions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("business_district.hive_task")
+    monkeypatch.setattr(hive_task, "HIVE_TABLE_ROOT", tmp_path)
+    empty_partition = tmp_path / "input_table" / "dt=20260102"
+    empty_partition.mkdir(parents=True)
+    pd.DataFrame(columns=["storename"]).to_parquet(
+        empty_partition / "part-000.parquet",
+        index=False,
+    )
+
+    with pytest.raises(
+        hive_task.TransactionDataError,
+        match="日期范围内没有非空分区",
+    ):
+        hive_task.read_partitioned_hive_table(
+            "dev_icamp.input_table",
+            ["20260101", "20260102"],
+        )
+
+
 def test_hive_target_output_formats_status_as_dict_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -129,10 +187,13 @@ def test_hive_target_output_formats_status_as_dict_code(
         ]
     )
 
-    output = hive_task.build_hive_target_output(business_results)
+    output = hive_task.build_hive_target_output(business_results, "20260102")
 
     assert output["is_abnormal"].tolist() == ["1", "2", "6"]
     assert output["is_interfere"].tolist() == ["N", "N", "N"]
+    assert output["dt"].tolist() == ["20260102", "20260102", "20260102"]
+    assert output.columns.tolist() == hive_task.TARGET_COLUMNS
+    assert output.columns.get_loc("is_abnormal") < output.columns.get_loc("update_time")
 
 
 def test_overwrite_target_table_replaces_current_regions_only(
@@ -181,6 +242,7 @@ def test_overwrite_target_table_replaces_current_regions_only(
         output,
         "target_table",
         "temp_table",
+        "20260102",
     )
 
     joined_sql = " ".join(" ".join(sql.split()) for sql in sql_statements).lower()
@@ -193,7 +255,9 @@ def test_overwrite_target_table_replaces_current_regions_only(
     assert "target.region = source_regions.region" in joined_sql
     assert "source_regions.region is null" in joined_sql
     assert "union all" in joined_sql
-    assert "insert overwrite table target_table partition (dt=20260101)" in joined_sql
+    assert written_tables[0][0].columns.tolist() == hive_task.TARGET_SELECT_COLUMNS
+    assert "target.dt = 20260102" in joined_sql
+    assert "insert overwrite table target_table partition (dt=20260102)" in joined_sql
     assert "from temp_table_merged" in joined_sql
 
 
@@ -223,7 +287,6 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
                 "end_date": "20260101",
                 "region": "shanghai",
                 "max_transaction_time_interval": "90",
-                "transaction_time_interval_weight": "45",
                 "min_transaction_number": "1",
                 "min_merchant_count": "3",
                 "is_daily": "0",
@@ -241,6 +304,7 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
     )
     reads: list[tuple[str, list[str]]] = []
     partition_reads: list[tuple[str, list[str]]] = []
+    writes: list[tuple[str, list[str]]] = []
 
     def read_table(table_name: str, dt: list[str]) -> pd.DataFrame:
         reads.append((table_name, dt))
@@ -279,6 +343,16 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
         business_results=business_results,
         summary=types.SimpleNamespace(output_directory="out"),
     )
+
+    def overwrite_target_table(
+        sd: types.SimpleNamespace,
+        result: pd.DataFrame,
+        table_name: str,
+        temp_table_name: str,
+        output_dt: str,
+    ) -> None:
+        writes.append((output_dt, result["dt"].tolist()))
+
     monkeypatch.setattr(hive_task, "sd", types.SimpleNamespace(read_table=read_table))
     monkeypatch.setattr(
         hive_task,
@@ -303,7 +377,7 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
     monkeypatch.setattr(
         hive_task,
         "overwrite_target_table",
-        lambda sd, result, table_name, temp_table_name: None,
+        overwrite_target_table,
     )
 
     task_config = hive_task.HiveTaskConfig(
@@ -318,10 +392,11 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
 
     assert reads == [("param_table", ["20260101"])]
     assert partition_reads == [("source_table", ["20260101"])]
+    assert writes == [("20260101", ["20260101"])]
     assert summary.input_rows == 1
 
 
-def test_hive_parameters_override_notebook_values(
+def test_hive_parameters_preserve_notebook_decay_tau(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -334,7 +409,6 @@ def test_hive_parameters_override_notebook_values(
                 "end_date": "20260103",
                 "region": "shanghai",
                 "max_transaction_time_interval": "90",
-                "transaction_time_interval_weight": "45.5",
                 "min_transaction_number": "4",
                 "min_merchant_count": "5",
                 "is_daily": "1",
@@ -343,14 +417,19 @@ def test_hive_parameters_override_notebook_values(
     )
 
     parameters = hive_task.load_hive_algorithm_parameters(parameter_data, "param_table")
-    runtime_config = hive_task.build_runtime_config(parameters, "param_table")
+    notebook_config = _app_config(tmp_path)
+    runtime_config = hive_task.build_runtime_config(
+        parameters,
+        "param_table",
+        notebook_config.cooccurrence.decay_tau_minutes,
+    )
     config = hive_task.apply_runtime_parameters(
-        _app_config(tmp_path),
+        notebook_config,
         runtime_config,
     )
 
     assert config.cooccurrence.window_minutes == 90
-    assert config.cooccurrence.decay_tau_minutes == 45.5
+    assert config.cooccurrence.decay_tau_minutes == 1.0
     assert config.cooccurrence.minimum_unique_users == 4
     assert config.anchors.minimum_community_size == 5
 
@@ -367,7 +446,6 @@ def test_filter_source_data_by_parameters_uses_region_and_date(
                 "end_date": "20260102",
                 "region": "shanghai",
                 "max_transaction_time_interval": "120",
-                "transaction_time_interval_weight": "60",
                 "min_transaction_number": "3",
                 "min_merchant_count": "3",
                 "is_daily": "1",
@@ -425,7 +503,6 @@ def test_hive_parameters_reject_non_numeric_is_daily(
                 "end_date": "20260101",
                 "region": "shanghai",
                 "max_transaction_time_interval": "120",
-                "transaction_time_interval_weight": "60",
                 "min_transaction_number": "3",
                 "min_merchant_count": "3",
                 "is_daily": "true",

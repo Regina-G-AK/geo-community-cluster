@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 
 from business_district.resource_usage import (

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Tuple
 
 from business_district.errors import ConfigurationError
 
@@ -15,7 +16,7 @@ class CityConfig:
 @dataclass(frozen=True)
 class InputConfig:
     transactions_path: Path
-    timestamp_formats: tuple[str, ...]
+    timestamp_formats: Tuple[str, ...]
 
 
 @dataclass(frozen=True)

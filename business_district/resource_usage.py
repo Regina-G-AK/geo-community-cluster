@@ -4,6 +4,7 @@ import time
 import tracemalloc
 from dataclasses import dataclass
 from pathlib import Path
+from typing import List, Optional
 
 
 @dataclass(frozen=True)
@@ -12,9 +13,9 @@ class ResourceUsage:
     python_memory_current_mb: float
     python_memory_peak_mb: float
     python_memory_peak_phase: str
-    process_memory_current_mb: float | None
-    process_memory_peak_mb: float | None
-    process_memory_peak_phase: str | None
+    process_memory_current_mb: Optional[float]
+    process_memory_peak_mb: Optional[float]
+    process_memory_peak_phase: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -23,16 +24,16 @@ class ResourceSample:
     elapsed_seconds: float
     python_memory_current_mb: float
     python_memory_peak_mb: float
-    process_memory_current_mb: float | None
+    process_memory_current_mb: Optional[float]
 
 
 @dataclass(frozen=True)
 class ProcessMemoryUsage:
-    current_mb: float | None
+    current_mb: Optional[float]
 
 
-_RESOURCE_SAMPLES: list[ResourceSample] | None = None
-_RESOURCE_STARTED_AT: float | None = None
+_RESOURCE_SAMPLES: Optional[List[ResourceSample]] = None
+_RESOURCE_STARTED_AT: Optional[float] = None
 
 
 def _bytes_to_mb(value: int) -> float:
@@ -51,7 +52,7 @@ def _parse_linux_memory_value(line: str) -> int:
 
 
 def _read_linux_process_memory(status_path: Path) -> ProcessMemoryUsage:
-    current_kb: int | None = None
+    current_kb: Optional[int] = None
     for line in status_path.read_text(encoding="utf-8").splitlines():
         if line.startswith("VmRSS:"):
             current_kb = _parse_linux_memory_value(line)
@@ -66,7 +67,7 @@ def _read_process_memory_usage() -> ProcessMemoryUsage:
     return ProcessMemoryUsage(current_mb=None)
 
 
-def _format_optional_mb(value: float | None) -> str:
+def _format_optional_mb(value: Optional[float]) -> str:
     if value is None:
         return "unavailable"
     return f"{value:.2f}"
@@ -84,11 +85,11 @@ def _capture_resource_sample(started_at: float, phase: str) -> ResourceSample:
     )
 
 
-def _peak_python_sample(samples: list[ResourceSample]) -> ResourceSample:
+def _peak_python_sample(samples: List[ResourceSample]) -> ResourceSample:
     return max(samples, key=lambda sample: sample.python_memory_peak_mb)
 
 
-def _peak_process_sample(samples: list[ResourceSample]) -> ResourceSample | None:
+def _peak_process_sample(samples: List[ResourceSample]) -> Optional[ResourceSample]:
     available_samples = [
         sample
         for sample in samples
@@ -102,7 +103,7 @@ def _peak_process_sample(samples: list[ResourceSample]) -> ResourceSample | None
     )
 
 
-def format_resource_usage_lines(resource_usage: ResourceUsage) -> list[str]:
+def format_resource_usage_lines(resource_usage: ResourceUsage) -> List[str]:
     return [
         f"elapsed_seconds={resource_usage.elapsed_seconds:.2f}",
         f"python_memory_current_mb={resource_usage.python_memory_current_mb:.2f}",

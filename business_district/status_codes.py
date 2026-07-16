@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from typing import Dict, FrozenSet
+
 import pandas as pd
 
-STATUS_CODE_BY_NAME: dict[str, str] = {
+STATUS_CODE_BY_NAME: Dict[str, str] = {
     "active": "1",
     "normal": "1",
     "suspect_online": "2",
@@ -12,8 +14,8 @@ STATUS_CODE_BY_NAME: dict[str, str] = {
     "suspect_chain_store": "6",
     "deleted": "7",
 }
-NORMAL_STATUS_CODES: frozenset[str] = frozenset({"1"})
-NORMAL_STATUS_NAMES: frozenset[str] = frozenset({"active", "normal", "正常"})
+NORMAL_STATUS_CODES: FrozenSet[str] = frozenset({"1"})
+NORMAL_STATUS_NAMES: FrozenSet[str] = frozenset({"active", "normal", "正常"})
 
 
 def format_status_code(value: object) -> str:

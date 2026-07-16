@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import Dict, List, Set
 
 import igraph as ig
 import leidenalg as la
@@ -13,8 +14,8 @@ from business_district.config import CommunityConfig
 @dataclass(frozen=True)
 class CleaningResult:
     graph: nx.Graph
-    partition: dict[str, int]
-    statuses: dict[str, str]
+    partition: Dict[str, int]
+    statuses: Dict[str, str]
     cleaning_rounds: int
 
 
@@ -22,12 +23,12 @@ def detect_communities(
     graph: nx.Graph,
     resolution: float,
     random_seed: int,
-) -> dict[str, int]:
+) -> Dict[str, int]:
     connected_nodes = sorted(node for node in graph if graph.degree(node) > 0)
     isolated_nodes = sorted(node for node in graph if graph.degree(node) == 0)
     connected_graph = graph.subgraph(connected_nodes).copy()
 
-    communities: list[set[str]] = []
+    communities: List[Set[str]] = []
     if connected_graph.number_of_nodes() > 0:
         node_ids = [str(node) for node in connected_nodes]
         node_indices = {
@@ -70,8 +71,8 @@ def detect_communities(
 
 def calculate_participation(
     graph: nx.Graph,
-    partition: dict[str, int],
-) -> dict[str, float]:
+    partition: Dict[str, int],
+) -> Dict[str, float]:
     community_shares = calculate_community_weight_shares(graph, partition)
     return {
         merchant_id: 1.0 - sum(share**2 for share in shares.values())
@@ -81,11 +82,11 @@ def calculate_participation(
 
 def calculate_community_weight_shares(
     graph: nx.Graph,
-    partition: dict[str, int],
-) -> dict[str, dict[int, float]]:
-    shares_by_merchant: dict[str, dict[int, float]] = {}
+    partition: Dict[str, int],
+) -> Dict[str, Dict[int, float]]:
+    shares_by_merchant: Dict[str, Dict[int, float]] = {}
     for node in graph:
-        weight_by_community: dict[int, float] = defaultdict(float)
+        weight_by_community: Dict[int, float] = defaultdict(float)
         total_weight = 0.0
         for neighbor, edge_data in graph[node].items():
             weight = float(edge_data["weight"])

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 import pickle
 from datetime import datetime
@@ -767,16 +769,17 @@ def test_leiden_communities_are_connected_and_deterministic() -> None:
     assert first["a"] == first["b"] == first["c"]
     assert first["d"] == first["e"] == first["f"]
     assert first["a"] != first["d"]
+    communities = (
+        [
+            node
+            for node, node_community_id in first.items()
+            if node_community_id == community_id
+        ]
+        for community_id in set(first.values())
+    )
     assert all(
         nx.is_connected(graph.subgraph(nodes))
-        for community_id in set(first.values())
-        if (
-            nodes := [
-                node
-                for node, node_community_id in first.items()
-                if node_community_id == community_id
-            ]
-        )
+        for nodes in communities
     )
 
 

@@ -4,23 +4,33 @@
 
 ## 运行与配置
 
-本项目不再读取 INI、TOML 等配置文件，也不提供带默认参数的命令行任务入口。初始化聚类和增量归属统一通过 `notebooks/run_hive_business_district.ipynb` 配置和运行；城市、输入格式、图算法、社区算法、地理参数、锚点、输出目录、增量归属及工作进程数均在 notebook 的配置单元中显式构造。
+项目运行环境固定为 Python 3.7.1 至 3.7.x，依赖版本以 `pyproject.toml` 为准。
+
+本项目不再读取 INI、TOML 等配置文件，也不提供带默认参数的命令行任务入口。初始化聚类和增量归属可通过 `notebooks/run_hive_business_district.ipynb` 或等价的 `run_hive_business_district.py` 配置和运行；城市、输入格式、图算法、社区算法、地理参数、锚点、输出目录、增量归属及工作进程数均在入口中显式构造。
 
 `RuntimeConfig.process_count` 配置工作进程数，必须是不小于 `1` 的整数；notebook 当前使用 `4`。初始化聚类会按卡号分片并行计算商户对统计，增量归属会按候选商户分片并行计算图与地理评分。设置为 `1` 时使用相同的串行计算逻辑，适合小数据量运行。
 
 每次运行会直接在 `[output].directory` 下写入 `pair_statistics_{region}.pkl` 商户对中间文件，其中 `region` 使用 `[city].code`。
 
-本地入口会在运行结束后输出资源监测结果：`elapsed_seconds` 表示总耗时，`python_memory_current_mb` 和 `python_memory_peak_mb` 表示 Python 已跟踪内存，`python_memory_peak_phase` 表示 Python 内存峰值出现的阶段；`process_memory_current_mb` 和 `process_memory_peak_mb` 表示进程 RSS 当前值和监控打点中的最高值，`process_memory_peak_phase` 表示进程内存峰值所在阶段。生产 Linux 环境中优先使用 `process_memory_peak_mb` 和 `process_memory_peak_phase` 估算当前配置和数据量需要的内存资源；不支持进程口径的平台会显示 `unavailable`。
+线上 Jupyter 入口和独立 Python 入口当前均不启用资源监测，不会启动 `tracemalloc` 或读取 `/proc/self/status`；资源监测模块保留供本地排查使用。
 
-Hive 任务通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再按参数表中的 `start_date`、`end_date` 和 `region` 读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应日期分区。交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供，其余静态算法参数由 notebook 提供。结果写入 `dev_icamp.icamp_merchant_cluster_algo_output` 时，会在对应 `dt` 分区内保留其他 `region` 的已有结果，并用本次结果替换相同 `region` 的已有结果，不再写入风险商户表。
+Hive 任务通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再按参数表中的 `start_date`、`end_date` 和 `region` 读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应日期分区。交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供，其余静态算法参数由 notebook 提供。结果统一写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的 T-1 分区；初始化任务会保留该分区内其他 `region` 的已有结果，并用本次结果替换相同 `region` 的已有结果，不再写入风险商户表。
 
-Hive 初始化入口的交易输入表会按 `/appdata/project/yw061178/tbl/{表名}/dt={日期}/part*` 分片读取 parquet 文件并合并；当分片数据缺少 `dt` 列时会按分区日期自动补齐。
+Hive 初始化入口的交易输入表会按 `/appdata/project/yw061178/tbl/{表名}/dt={日期}/part*` 分片读取 parquet 文件并合并；`dt` 统一使用分区路径中的日期，即使分片内自带 `dt` 列也会覆盖。日期范围内缺少目录、没有 `part*` 文件或分片全部为空的分区会被跳过；如果全部日期均无有效数据，任务会明确报错。
 
 Jupyter 环境可直接打开：
 
 ```text
 notebooks/run_hive_business_district.ipynb
 ```
+
+不使用 Jupyter 时，可在项目根目录直接运行等价的 Python 入口：
+
+```powershell
+python run_hive_business_district.py
+```
+
+Python 入口与 notebook 使用相同的静态算法参数、Hive 表和任务生命周期，也会按参数表 `is_daily` 自动选择增量归属或初始化聚类。
 
 notebook 通过 `HiveTaskConfig` 显式传入强类型算法配置、输入表、参数表、输出表、临时表和 `dt_expression`，先普通读取参数表 T-1 分区，再按 `is_daily` 调度入口：`1` 调用增量归属，`0` 调用初始化聚类。
 
@@ -95,12 +105,11 @@ Hive 参数表 `dev_icamp.icamp_merchant_cluster_algo_param` 必须包含：
 - `end_date`
 - `region`
 - `max_transaction_time_interval`
-- `transaction_time_interval_weight`
 - `min_transaction_number`
 - `min_merchant_count`
 - `is_daily`
 
-入口会用参数表的 `region` 和交易表 `region` 关联，并用 `transaction_time` 落在 `[start_date, end_date]` 的记录作为本次算法输入。`is_daily` 取值只能是 `0` 或 `1`，其中 `1` 表示增量归属，`0` 表示初始化聚类。`max_transaction_time_interval` 映射到共现窗口分钟数，`transaction_time_interval_weight` 映射到交易时间衰减参数，`min_transaction_number` 映射到最小支持交易人数，`min_merchant_count` 映射到有效商圈最小商户数。同一任务分区内多行参数必须使用相同算法参数，否则任务会报错。
+入口会用参数表的 `region` 和交易表 `region` 关联，并用 `transaction_time` 落在 `[start_date, end_date]` 的记录作为本次算法输入。`is_daily` 取值只能是 `0` 或 `1`，其中 `1` 表示增量归属，`0` 表示初始化聚类。`max_transaction_time_interval` 映射到共现窗口分钟数，`min_transaction_number` 映射到最小支持交易人数，`min_merchant_count` 映射到有效商圈最小商户数。同一任务分区内多行参数必须使用相同算法参数，否则任务会报错。交易时间衰减参数不再从参数表读取，初始化和增量任务统一使用 notebook 中的 `algorithm_config.cooccurrence.decay_tau_minutes`。
 
 Hive 入口写入目标表字段为：
 
@@ -109,12 +118,12 @@ Hive 入口写入目标表字段为：
 - `previous_community_id`
 - `region`
 - `is_interfere`
-- `update_time`
 - `is_abnormal`
+- `update_time`
 - `is_position`
 - `dt`
 
-其中 `community_id` 为商圈 ID，分类 `2` 的线下连锁店及访问量规则识别出的连锁/泛客群商户可保留多条普通成员挂靠记录且 `is_position` 恒为 `0`；`previous_community_id` 留空，`region` 与输入表保持一致，`is_interfere` 固定为 `N`，`update_time` 为运行时间戳，`is_abnormal` 使用商户状态码，`is_position` 表示是否为锚点商户，`dt` 使用输入分区或当前任务分区。
+其中 `community_id` 为商圈 ID，分类 `2` 的线下连锁店及访问量规则识别出的连锁/泛客群商户可保留多条普通成员挂靠记录且 `is_position` 恒为 `0`；`previous_community_id` 留空，`region` 与输入表保持一致，`is_interfere` 固定为 `N`，`is_abnormal` 使用商户状态码，`update_time` 为运行时间戳，`is_position` 表示是否为锚点商户，`dt` 固定使用任务运行时计算出的 T-1 分区。
 
 ## 商户状态
 

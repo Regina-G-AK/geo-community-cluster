@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 import importlib
 import pickle
@@ -392,7 +394,7 @@ def test_hive_task_config_uses_explicit_algorithm_config(
     assert config.parameter_table == "parameter_table"
 
 
-def test_incremental_cooccurrence_config_uses_parameter_table(
+def test_incremental_cooccurrence_config_uses_notebook_decay_tau(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
@@ -404,7 +406,6 @@ def test_incremental_cooccurrence_config_uses_parameter_table(
                 "end_date": "20260102",
                 "region": "shanghai",
                 "max_transaction_time_interval": "90",
-                "transaction_time_interval_weight": "45.5",
                 "min_transaction_number": "4",
                 "min_merchant_count": "5",
                 "is_daily": "1",
@@ -416,10 +417,11 @@ def test_incremental_cooccurrence_config_uses_parameter_table(
     config = hive_task.build_incremental_cooccurrence_config(
         parameters,
         "param_table",
+        12.5,
     )
 
     assert config.window_minutes == 90
-    assert config.decay_tau_minutes == 45.5
+    assert config.decay_tau_minutes == 12.5
     assert config.minimum_unique_users == 4
     assert hive_task.build_source_dt_list(parameters) == ["20260101", "20260102"]
 
@@ -482,7 +484,6 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "end_date": "20260102",
                 "region": "shanghai",
                 "max_transaction_time_interval": "90",
-                "transaction_time_interval_weight": "45",
                 "min_transaction_number": "1",
                 "min_merchant_count": "3",
                 "is_daily": "1",
@@ -573,6 +574,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
     assert summary.inserted_rows == 1
     assert fake_sd.tables[0].loc[0, "storename"] == "new-shop"
     assert fake_sd.tables[0].loc[0, "community_id"] == "D001"
+    assert "partition (dt=20260101)" in "\n".join(fake_sd.sql).lower()
     with (output_directory / "pair_statistics_shanghai.pkl").open("rb") as file:
         statistics = pickle.load(file)
     assert statistics.supports[("new-shop", "old-shop")] == 1
@@ -601,12 +603,20 @@ def test_insert_new_target_rows_uses_insert_into(
         ]
     )
 
-    hive_task.insert_new_target_rows(fake_sd, output, "target_table", "temp_table")
+    hive_task.insert_new_target_rows(
+        fake_sd,
+        output,
+        "target_table",
+        "temp_table",
+        "20260102",
+    )
 
     joined_sql = "\n".join(fake_sd.sql).lower()
     assert "insert into table target_table" in joined_sql
+    assert "partition (dt=20260102)" in joined_sql
     assert "insert overwrite" not in joined_sql
     assert "left join target_table target" not in joined_sql
+    assert fake_sd.tables[0].columns.tolist() == hive_task.TARGET_SELECT_COLUMNS
 
 
 def test_load_incremental_transactions_keeps_first_duplicate_flow_day(

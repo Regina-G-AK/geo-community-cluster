@@ -4,7 +4,8 @@ import math
 import multiprocessing
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Counter as CounterType
+from typing import Dict, List, Optional, Tuple, Union
 
 import networkx as nx
 import pandas as pd
@@ -18,13 +19,13 @@ EdgeCandidate = Tuple[float, Optional[float], int]
 
 @dataclass(frozen=True)
 class PairStatistics:
-    strengths: dict[MerchantPair, float]
-    supports: dict[MerchantPair, int]
-    merchant_visit_counts: dict[str, int]
+    strengths: Dict[MerchantPair, float]
+    supports: Dict[MerchantPair, int]
+    merchant_visit_counts: Dict[str, int]
 
 
-PairStatisticsTask = tuple[
-    tuple[tuple[str, tuple[tuple[str, pd.Timestamp], ...]], ...],
+PairStatisticsTask = Tuple[
+    Tuple[Tuple[str, Tuple[Tuple[str, pd.Timestamp], ...]], ...],
     CooccurrenceConfig,
 ]
 
@@ -32,13 +33,13 @@ PairStatisticsTask = tuple[
 def _build_pair_statistics_chunk(task: PairStatisticsTask) -> PairStatistics:
     groups, config = task
     window = pd.Timedelta(minutes=config.window_minutes)
-    strength_by_pair: dict[MerchantPair, float] = defaultdict(float)
-    support_by_pair: dict[MerchantPair, int] = defaultdict(int)
-    merchant_visit_counts: Counter[str] = Counter()
+    strength_by_pair: Dict[MerchantPair, float] = defaultdict(float)
+    support_by_pair: Dict[MerchantPair, int] = defaultdict(int)
+    merchant_visit_counts: CounterType[str] = Counter()
 
     for _, rows in groups:
         merchant_visit_counts.update(merchant_id for merchant_id, _ in rows)
-        user_pair_max: dict[MerchantPair, float] = {}
+        user_pair_max: Dict[MerchantPair, float] = {}
         for left_index, (left_merchant, left_timestamp) in enumerate(rows[:-1]):
             for right_merchant, right_timestamp in rows[left_index + 1 :]:
                 delta = right_timestamp - left_timestamp
@@ -64,7 +65,7 @@ def _build_pair_statistics_chunk(task: PairStatisticsTask) -> PairStatistics:
 def _partition_card_groups(
     visits: pd.DataFrame,
     process_count: int,
-) -> tuple[tuple[tuple[str, tuple[tuple[str, pd.Timestamp], ...]], ...], ...]:
+) -> Tuple[Tuple[Tuple[str, Tuple[Tuple[str, pd.Timestamp], ...]], ...], ...]:
     groups = tuple(
         (
             str(card_id),
@@ -84,11 +85,11 @@ def _partition_card_groups(
 
 
 def _merge_pair_statistics_chunks(
-    chunks: list[PairStatistics],
+    chunks: List[PairStatistics],
 ) -> PairStatistics:
-    strengths: dict[MerchantPair, float] = defaultdict(float)
-    supports: dict[MerchantPair, int] = defaultdict(int)
-    visit_counts: Counter[str] = Counter()
+    strengths: Dict[MerchantPair, float] = defaultdict(float)
+    supports: Dict[MerchantPair, int] = defaultdict(int)
+    visit_counts: CounterType[str] = Counter()
     for chunk in chunks:
         for pair, strength in chunk.strengths.items():
             strengths[pair] += strength
@@ -119,7 +120,7 @@ def _calculate_sppmi_candidates(
     statistics: PairStatistics,
     cooccurrence_config: CooccurrenceConfig,
     graph_config: GraphConfig,
-) -> dict[MerchantPair, tuple[float, float, int]]:
+) -> Dict[MerchantPair, Tuple[float, float, int]]:
     eligible = {
         pair: strength
         for pair, strength in statistics.strengths.items()
@@ -128,7 +129,7 @@ def _calculate_sppmi_candidates(
     if not eligible:
         return {}
 
-    marginals: dict[str, float] = defaultdict(float)
+    marginals: Dict[str, float] = defaultdict(float)
     for (left, right), strength in eligible.items():
         marginals[left] += strength
         marginals[right] += strength
@@ -138,7 +139,7 @@ def _calculate_sppmi_candidates(
         strength ** graph_config.context_smoothing_alpha
         for strength in marginals.values()
     ) / 2.0
-    candidates: dict[MerchantPair, tuple[float, float, int]] = {}
+    candidates: Dict[MerchantPair, Tuple[float, float, int]] = {}
 
     for pair, strength in eligible.items():
         left, right = pair
@@ -179,7 +180,7 @@ def _calculate_sppmi_candidates(
 def _calculate_transaction_count_candidates(
     statistics: PairStatistics,
     cooccurrence_config: CooccurrenceConfig,
-) -> dict[MerchantPair, EdgeCandidate]:
+) -> Dict[MerchantPair, EdgeCandidate]:
     return {
         pair: (float(strength), None, int(statistics.supports[pair]))
         for pair, strength in statistics.strengths.items()
@@ -191,7 +192,7 @@ def calculate_edge_candidates(
     statistics: PairStatistics,
     cooccurrence_config: CooccurrenceConfig,
     graph_config: GraphConfig,
-) -> dict[MerchantPair, EdgeCandidate]:
+) -> Dict[MerchantPair, EdgeCandidate]:
     if graph_config.edge_weight_method == "sppmi":
         return _calculate_sppmi_candidates(
             statistics,
@@ -209,9 +210,9 @@ def calculate_edge_candidates(
 
 
 def _normalize_community_weights(
-    weights_by_merchant: dict[str, dict[int, float]],
-) -> dict[str, dict[int, float]]:
-    shares_by_merchant: dict[str, dict[int, float]] = {}
+    weights_by_merchant: Dict[str, Dict[int, float]],
+) -> Dict[str, Dict[int, float]]:
+    shares_by_merchant: Dict[str, Dict[int, float]] = {}
     for merchant_id, weights in weights_by_merchant.items():
         total_weight = sum(weights.values())
         if total_weight <= 0.0:
@@ -225,10 +226,10 @@ def _normalize_community_weights(
 
 
 def calculate_candidate_community_weight_shares(
-    candidates: dict[MerchantPair, EdgeCandidate],
-    partition: dict[str, int],
-) -> dict[str, dict[int, float]]:
-    weights_by_merchant: dict[str, dict[int, float]] = defaultdict(
+    candidates: Dict[MerchantPair, EdgeCandidate],
+    partition: Dict[str, int],
+) -> Dict[str, Dict[int, float]]:
+    weights_by_merchant: Dict[str, Dict[int, float]] = defaultdict(
         lambda: defaultdict(float)
     )
     for (left, right), (weight, _, _) in candidates.items():
@@ -252,17 +253,17 @@ def build_sparse_graph(
         cooccurrence_config,
         graph_config,
     )
-    neighbors: dict[
+    neighbors: Dict[
         str,
-        list[tuple[str, float, float | None, int]],
+        List[Tuple[str, float, Optional[float], int]],
     ] = defaultdict(list)
     for (left, right), (weight, z_score, support) in candidates.items():
         neighbors[left].append((right, weight, z_score, support))
         neighbors[right].append((left, weight, z_score, support))
 
-    top_neighbors: dict[
+    top_neighbors: Dict[
         str,
-        dict[str, tuple[float, float | None, int]],
+        Dict[str, Tuple[float, Optional[float], int]],
     ] = {}
     for merchant_id, merchant_neighbors in neighbors.items():
         ordered = sorted(
@@ -281,7 +282,7 @@ def build_sparse_graph(
             reverse = top_neighbors.get(neighbor, {})
             if merchant_id not in reverse or graph.has_edge(merchant_id, neighbor):
                 continue
-            edge_attributes: dict[str, float | int] = {
+            edge_attributes: Dict[str, Union[float, int]] = {
                 "weight": float(weight),
                 "support": int(support),
             }

@@ -5,6 +5,7 @@ import multiprocessing
 import time
 from dataclasses import dataclass
 from types import ModuleType
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple, Union
 
 import networkx as nx
 import pandas as pd
@@ -79,8 +80,8 @@ TARGET_COLUMNS = [
     "previous_community_id",
     "region",
     "is_interfere",
-    "update_time",
     "is_abnormal",
+    "update_time",
     "is_position",
     "dt",
 ]
@@ -90,8 +91,8 @@ TARGET_SELECT_COLUMNS = [
     "previous_community_id",
     "region",
     "is_interfere",
-    "update_time",
     "is_abnormal",
+    "update_time",
     "is_position",
 ]
 SOURCE_REQUIRED_COLUMNS = {
@@ -115,9 +116,9 @@ class CommunityMember:
 
 @dataclass(frozen=True)
 class SourceCommunityState:
-    existing_storenames: frozenset[str]
-    members: dict[str, CommunityMember]
-    skipped_multi_community_storenames: frozenset[str]
+    existing_storenames: FrozenSet[str]
+    members: Dict[str, CommunityMember]
+    skipped_multi_community_storenames: FrozenSet[str]
 
 
 @dataclass(frozen=True)
@@ -131,7 +132,7 @@ class HiveCandidateMerchant:
 @dataclass(frozen=True)
 class HiveTaskConfig:
     algorithm_config: AppConfig
-    timestamp_formats: tuple[str, ...]
+    timestamp_formats: Tuple[str, ...]
     visit_config: VisitConfig
     graph_config: GraphConfig
     assignment_config: AssignmentConfig
@@ -154,11 +155,11 @@ class HiveTaskSummary:
 
 def _require_columns(
     dataframe: pd.DataFrame,
-    required_columns: set[str],
+    required_columns: Set[str],
     table_name: str,
 ) -> pd.DataFrame:
     result = dataframe.copy()
-    result.columns = result.columns.astype("string").str.strip()
+    # result.columns = result.columns.astype("string").str.strip()
     missing_columns = sorted(required_columns.difference(set(result.columns)))
     if missing_columns:
         raise TransactionDataError(
@@ -189,17 +190,17 @@ def _format_hive_id(value: object) -> str:
 
 def _parse_transaction_time(
     values: pd.Series,
-    timestamp_formats: tuple[str, ...],
+    timestamp_formats: Tuple[str, ...],
     table_name: str,
 ) -> pd.Series:
     parsed = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
-    text_values = values.astype("string").str.strip()
+    # text_values = values.astype("string").str.strip()
     for timestamp_format in timestamp_formats:
         missing = parsed.isna()
         if not missing.any():
             break
         parsed.loc[missing] = pd.to_datetime(
-            text_values.loc[missing],
+            values.loc[missing],
             format=timestamp_format,
             errors="coerce",
         )
@@ -215,12 +216,12 @@ def _parse_transaction_time(
 
 def load_incremental_transactions(
     source_data: pd.DataFrame,
-    timestamp_formats: tuple[str, ...],
+    timestamp_formats: Tuple[str, ...],
     dt_value: str,
     source_table: str,
 ) -> pd.DataFrame:
     source = source_data.copy()
-    source.columns = source.columns.astype("string").str.strip()
+    # source.columns = source.columns.astype("string").str.strip()
     if DT not in source.columns:
         source[DT] = dt_value
     source = _require_columns(source, SOURCE_REQUIRED_COLUMNS.union({DT}), source_table)
@@ -314,14 +315,14 @@ def load_incremental_transactions(
 
 def load_source_candidates(
     transactions: pd.DataFrame,
-    existing_storenames: set[str],
+    existing_storenames: Set[str],
     dt_value: str,
-) -> list[HiveCandidateMerchant]:
+) -> List[HiveCandidateMerchant]:
     selected = transactions[[MERCHANT, TIMESTAMP, REGION, MERCHANT_CATEGORY]].copy()
     ordered = selected.sort_values([MERCHANT, TIMESTAMP])
     latest = ordered.drop_duplicates(subset=[MERCHANT], keep="last")
 
-    candidates: list[HiveCandidateMerchant] = []
+    candidates: List[HiveCandidateMerchant] = []
     for row in latest.to_dict("records"):
         storename = _clean_text(row[MERCHANT])
         if storename in existing_storenames:
@@ -338,10 +339,15 @@ def load_source_candidates(
 
 
 def build_incremental_cooccurrence_config(
-    parameters: list[HiveAlgorithmParameter],
+    parameters: List[HiveAlgorithmParameter],
     parameter_table: str,
+    decay_tau_minutes: float,
 ) -> CooccurrenceConfig:
-    runtime_config = build_runtime_config(parameters, parameter_table)
+    runtime_config = build_runtime_config(
+        parameters,
+        parameter_table,
+        decay_tau_minutes,
+    )
     return CooccurrenceConfig(
         window_minutes=runtime_config.window_minutes,
         decay_tau_minutes=runtime_config.decay_tau_minutes,
@@ -353,9 +359,9 @@ def merge_pair_statistics(
     base_statistics: PairStatistics,
     incremental_statistics: PairStatistics,
 ) -> PairStatistics:
-    strengths: dict[tuple[str, str], float] = dict(base_statistics.strengths)
-    supports: dict[tuple[str, str], int] = dict(base_statistics.supports)
-    merchant_visit_counts: dict[str, int] = dict(base_statistics.merchant_visit_counts)
+    strengths: Dict[Tuple[str, str], float] = dict(base_statistics.strengths)
+    supports: Dict[Tuple[str, str], int] = dict(base_statistics.supports)
+    merchant_visit_counts: Dict[str, int] = dict(base_statistics.merchant_visit_counts)
 
     for pair, strength in incremental_statistics.strengths.items():
         if pair in strengths:
@@ -393,7 +399,7 @@ def build_source_community_state(
         {MERCHANT, RAW_BUSINESS_DISTRICT},
         source_table,
     )
-    community_ids_by_storename: dict[str, set[str]] = {}
+    community_ids_by_storename: Dict[str, Set[str]] = {}
     for row in source[[MERCHANT, RAW_BUSINESS_DISTRICT]].to_dict("records"):
         storename = _clean_text(row[MERCHANT])
         community_id = _format_hive_id(row[RAW_BUSINESS_DISTRICT])
@@ -403,8 +409,8 @@ def build_source_community_state(
             community_ids_by_storename[storename] = set()
         community_ids_by_storename[storename].add(community_id)
 
-    members: dict[str, CommunityMember] = {}
-    skipped_storenames: set[str] = set()
+    members: Dict[str, CommunityMember] = {}
+    skipped_storenames: Set[str] = set()
     for storename, community_ids in community_ids_by_storename.items():
         if len(community_ids) != 1:
             skipped_storenames.add(storename)
@@ -429,7 +435,7 @@ def build_source_community_state(
     )
 
 
-def _community_sort_key(community_id: str) -> tuple[int, str]:
+def _community_sort_key(community_id: str) -> Tuple[int, str]:
     try:
         return int(community_id), community_id
     except ValueError:
@@ -438,7 +444,7 @@ def _community_sort_key(community_id: str) -> tuple[int, str]:
 
 def build_latest_merchant_coordinates(
     transactions: pd.DataFrame,
-) -> dict[str, CoordinatePoint]:
+) -> Dict[str, CoordinatePoint]:
     source = _require_columns(
         transactions,
         {MERCHANT, TIMESTAMP, LONGITUDE, LATITUDE},
@@ -467,13 +473,13 @@ def build_latest_merchant_coordinates(
 def _graph_candidate_scores(
     candidate: HiveCandidateMerchant,
     graph: nx.Graph,
-    members: dict[str, CommunityMember],
+    members: Dict[str, CommunityMember],
     assignment_config: AssignmentConfig,
-) -> dict[str, float]:
+) -> Dict[str, float]:
     if candidate.storename not in graph:
         return {}
-    weighted_votes: dict[str, float] = {}
-    neighbors: list[tuple[str, float]] = []
+    weighted_votes: Dict[str, float] = {}
+    neighbors: List[Tuple[str, float]] = []
     for neighbor in graph.neighbors(candidate.storename):
         member = members.get(str(neighbor))
         if member is None:
@@ -500,11 +506,11 @@ def _graph_candidate_scores(
 
 def _geographic_candidate_scores(
     candidate: HiveCandidateMerchant,
-    candidate_coordinates: dict[str, CoordinatePoint],
-    member_coordinates: dict[str, CoordinatePoint],
-    members: dict[str, CommunityMember],
+    candidate_coordinates: Dict[str, CoordinatePoint],
+    member_coordinates: Dict[str, CoordinatePoint],
+    members: Dict[str, CommunityMember],
     assignment_config: AssignmentConfig,
-) -> dict[str, float]:
+) -> Dict[str, float]:
     if assignment_config.community_assignment_distance_meters <= 0.0:
         raise TransactionDataError(
             "增量归属地理距离阈值必须大于 0: "
@@ -514,7 +520,7 @@ def _geographic_candidate_scores(
     candidate_point = candidate_coordinates.get(candidate.storename)
     if candidate_point is None:
         return {}
-    weighted_votes: dict[str, float] = {}
+    weighted_votes: Dict[str, float] = {}
     for member_name, member in members.items():
         member_point = member_coordinates.get(member_name)
         if member_point is None:
@@ -546,10 +552,10 @@ def _geographic_candidate_scores(
 
 def _nearest_member_distance(
     candidate: HiveCandidateMerchant,
-    candidate_coordinates: dict[str, CoordinatePoint],
-    member_coordinates: dict[str, CoordinatePoint],
-    members: dict[str, CommunityMember],
-) -> float | None:
+    candidate_coordinates: Dict[str, CoordinatePoint],
+    member_coordinates: Dict[str, CoordinatePoint],
+    members: Dict[str, CommunityMember],
+) -> Optional[float]:
     candidate_point = candidate_coordinates.get(candidate.storename)
     if candidate_point is None:
         return None
@@ -571,11 +577,11 @@ def _nearest_member_distance(
 
 def _geographic_status_override(
     candidate: HiveCandidateMerchant,
-    candidate_coordinates: dict[str, CoordinatePoint],
-    member_coordinates: dict[str, CoordinatePoint],
-    members: dict[str, CommunityMember],
+    candidate_coordinates: Dict[str, CoordinatePoint],
+    member_coordinates: Dict[str, CoordinatePoint],
+    members: Dict[str, CommunityMember],
     assignment_config: AssignmentConfig,
-) -> str | None:
+) -> Optional[str]:
     if assignment_config.city_maximum_distance_meters <= (
         assignment_config.community_assignment_distance_meters
     ):
@@ -602,10 +608,10 @@ def _geographic_status_override(
 
 
 def _merge_candidate_scores(
-    graph_scores: dict[str, float],
-    geographic_scores: dict[str, float],
+    graph_scores: Dict[str, float],
+    geographic_scores: Dict[str, float],
     assignment_config: AssignmentConfig,
-) -> dict[str, float]:
+) -> Dict[str, float]:
     if not graph_scores and not geographic_scores:
         return {}
     graph_weight = assignment_config.graph_weight if graph_scores else 0.0
@@ -630,7 +636,7 @@ def _merge_candidate_scores(
     }
 
 
-def _top_two(scores: dict[str, float]) -> tuple[str, str | None, float, float]:
+def _top_two(scores: Dict[str, float]) -> Tuple[str, Optional[str], float, float]:
     ordered = sorted(
         scores.items(),
         key=lambda item: (-item[1], _community_sort_key(item[0])),
@@ -642,13 +648,13 @@ def _top_two(scores: dict[str, float]) -> tuple[str, str | None, float, float]:
     return top_id, second_id, top_score, second_score
 
 
-IncrementalOutputRow = dict[str, str | int]
-IncrementalOutputTask = tuple[
-    tuple[HiveCandidateMerchant, ...],
+IncrementalOutputRow = Dict[str, Union[str, int]]
+IncrementalOutputTask = Tuple[
+    Tuple[HiveCandidateMerchant, ...],
     nx.Graph,
-    dict[str, CommunityMember],
-    dict[str, CoordinatePoint],
-    dict[str, CoordinatePoint],
+    Dict[str, CommunityMember],
+    Dict[str, CoordinatePoint],
+    Dict[str, CoordinatePoint],
     AssignmentConfig,
     str,
 ]
@@ -657,12 +663,12 @@ IncrementalOutputTask = tuple[
 def _build_incremental_row(
     candidate: HiveCandidateMerchant,
     graph: nx.Graph,
-    members: dict[str, CommunityMember],
-    candidate_coordinates: dict[str, CoordinatePoint],
-    member_coordinates: dict[str, CoordinatePoint],
+    members: Dict[str, CommunityMember],
+    candidate_coordinates: Dict[str, CoordinatePoint],
+    member_coordinates: Dict[str, CoordinatePoint],
     assignment_config: AssignmentConfig,
     timestamp: str,
-) -> list[IncrementalOutputRow]:
+) -> List[IncrementalOutputRow]:
     status_override = _geographic_status_override(
         candidate,
         candidate_coordinates,
@@ -746,7 +752,7 @@ def _build_incremental_row(
     ]
 
 
-def _build_incremental_rows(task: IncrementalOutputTask) -> list[IncrementalOutputRow]:
+def _build_incremental_rows(task: IncrementalOutputTask) -> List[IncrementalOutputRow]:
     (
         candidates,
         graph,
@@ -772,11 +778,11 @@ def _build_incremental_rows(task: IncrementalOutputTask) -> list[IncrementalOutp
 
 
 def build_incremental_output(
-    candidates: list[HiveCandidateMerchant],
+    candidates: List[HiveCandidateMerchant],
     graph: nx.Graph,
-    members: dict[str, CommunityMember],
-    candidate_coordinates: dict[str, CoordinatePoint],
-    member_coordinates: dict[str, CoordinatePoint],
+    members: Dict[str, CommunityMember],
+    candidate_coordinates: Dict[str, CoordinatePoint],
+    member_coordinates: Dict[str, CoordinatePoint],
     assignment_config: AssignmentConfig,
     update_time: datetime.datetime,
     process_count: int,
@@ -798,7 +804,7 @@ def build_incremental_output(
         if chunk_size > 0
         else tuple()
     )
-    tasks: list[IncrementalOutputTask] = [
+    tasks: List[IncrementalOutputTask] = [
         (
             chunk,
             graph,
@@ -824,25 +830,25 @@ def insert_new_target_rows(
     result: pd.DataFrame,
     table_name: str,
     temp_table_name: str,
+    output_dt: str,
 ) -> None:
     if result.empty:
         return
     select_columns = ", ".join(f"source.{column}" for column in TARGET_SELECT_COLUMNS)
-    for dt_value, partition_df in result.groupby("dt", sort=True):
-        write_df = partition_df.drop(columns=["dt"]).reset_index(drop=True)
+    write_df = result[TARGET_SELECT_COLUMNS].reset_index(drop=True)
+    sd_module.execute_sql(f"drop table if exists {temp_table_name}")
+    try:
+        sd_module.write_table(write_df, temp_table_name, debug=False, dt=None)
+        sd_module.execute_sql(
+            f"""
+            insert into table {table_name}
+            partition (dt={output_dt})
+            select {select_columns}
+            from {temp_table_name} source
+            """
+        )
+    finally:
         sd_module.execute_sql(f"drop table if exists {temp_table_name}")
-        try:
-            sd_module.write_table(write_df, temp_table_name, debug=False, dt=None)
-            sd_module.execute_sql(
-                f"""
-                insert into table {table_name}
-                partition (dt={dt_value})
-                select {select_columns}
-                from {temp_table_name} source
-                """
-            )
-        finally:
-            sd_module.execute_sql(f"drop table if exists {temp_table_name}")
 
 
 class TaskMain:
@@ -870,6 +876,7 @@ class TaskMain:
             runtime_config = build_runtime_config(
                 parameters,
                 self.task_config.parameter_table,
+                self.task_config.algorithm_config.cooccurrence.decay_tau_minutes,
             )
             algorithm_config = apply_runtime_parameters(
                 self.task_config.algorithm_config,
@@ -954,6 +961,7 @@ class TaskMain:
                 target_output,
                 self.task_config.target_table,
                 self.task_config.target_temp_table,
+                self.dt_var,
             )
             logrecord.log_data(
                 f"incremental taskrun seconds={time.time() - total_start:.2f}, "

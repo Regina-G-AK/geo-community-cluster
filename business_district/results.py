@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
+from typing import Dict, List, Set, Tuple, Union
 
 import networkx as nx
 import pandas as pd
@@ -44,9 +45,9 @@ def _membership_community_ids(
     merchant_id: str,
     primary_community_id: int,
     is_chain_like: bool,
-    community_shares: dict[str, dict[int, float]],
-    candidate_community_shares: dict[str, dict[int, float]],
-) -> tuple[int, ...]:
+    community_shares: Dict[str, Dict[int, float]],
+    candidate_community_shares: Dict[str, Dict[int, float]],
+) -> Tuple[int, ...]:
     shares = (
         candidate_community_shares.get(
             merchant_id,
@@ -66,8 +67,8 @@ def _membership_community_ids(
 
 def _expand_multi_community_memberships(
     merchants: pd.DataFrame,
-    community_shares: dict[str, dict[int, float]],
-    candidate_community_shares: dict[str, dict[int, float]],
+    community_shares: Dict[str, Dict[int, float]],
+    candidate_community_shares: Dict[str, Dict[int, float]],
 ) -> pd.DataFrame:
     if merchants.empty:
         return merchants.assign(
@@ -77,7 +78,7 @@ def _expand_multi_community_memberships(
             is_multi_community_member=pd.Series(dtype="int64"),
         )
 
-    rows: list[dict[str, str | int | float]] = []
+    rows: List[Dict[str, Union[str, int, float]]] = []
     for row in merchants.to_dict("records"):
         merchant_id = str(row["merchant_id"])
         primary_community_id = int(row["community_id"])
@@ -112,7 +113,7 @@ def _expand_multi_community_memberships(
 
 
 def _visit_count_quantile_threshold(
-    visit_counts: list[int],
+    visit_counts: List[int],
     quantile: float,
 ) -> int:
     if not visit_counts:
@@ -123,7 +124,7 @@ def _visit_count_quantile_threshold(
 
 
 def calculate_chain_visit_count_threshold(
-    visit_counts: list[int],
+    visit_counts: List[int],
     anchor_config: AnchorConfig,
 ) -> int:
     quantile_threshold = _visit_count_quantile_threshold(
@@ -134,9 +135,9 @@ def calculate_chain_visit_count_threshold(
 
 
 def identify_chain_like_merchants(
-    merchant_visit_counts: dict[str, int],
+    merchant_visit_counts: Dict[str, int],
     chain_visit_count_threshold: int,
-) -> set[str]:
+) -> Set[str]:
     return {
         merchant_id
         for merchant_id, visit_count in merchant_visit_counts.items()
@@ -146,7 +147,7 @@ def identify_chain_like_merchants(
 
 def _connected_community_count(
     merchant_id: str,
-    community_shares: dict[str, dict[int, float]],
+    community_shares: Dict[str, Dict[int, float]],
 ) -> int:
     return sum(
         1
@@ -158,7 +159,7 @@ def _connected_community_count(
 def _chain_reason(
     merchant_id: str,
     is_chain_like: bool,
-    category_chain_merchant_ids: set[str],
+    category_chain_merchant_ids: Set[str],
 ) -> str:
     if merchant_id in category_chain_merchant_ids:
         return "merchant_category"
@@ -169,9 +170,9 @@ def _chain_reason(
 
 def _add_chain_like_flags(
     merchants: pd.DataFrame,
-    community_shares: dict[str, dict[int, float]],
-    chain_like_merchant_ids: set[str],
-    category_chain_merchant_ids: set[str],
+    community_shares: Dict[str, Dict[int, float]],
+    chain_like_merchant_ids: Set[str],
+    category_chain_merchant_ids: Set[str],
     chain_visit_count_threshold: int,
 ) -> pd.DataFrame:
     if merchants.empty:
@@ -183,14 +184,15 @@ def _add_chain_like_flags(
         )
 
     enriched = merchants.copy()
+    merchant_ids = enriched["merchant_id"].tolist()
     enriched["connected_community_count"] = [
         _connected_community_count(str(merchant_id), community_shares)
-        for merchant_id in enriched["merchant_id"].tolist()
+        for merchant_id in merchant_ids
     ]
     enriched["chain_visit_count_threshold"] = chain_visit_count_threshold
     is_chain_like = [
         str(merchant_id) in chain_like_merchant_ids
-        for merchant_id in enriched["merchant_id"].tolist()
+        for merchant_id in merchant_ids
     ]
     enriched["is_chain_like"] = pd.Series(is_chain_like, index=enriched.index).astype(
         int
@@ -198,35 +200,34 @@ def _add_chain_like_flags(
     enriched["chain_reason"] = [
         _chain_reason(str(merchant_id), chain_flag, category_chain_merchant_ids)
         for merchant_id, chain_flag in zip(
-            enriched["merchant_id"].tolist(),
+            merchant_ids,
             is_chain_like,
-            strict=True,
         )
     ]
     return enriched
 
 
-def _primary_community_id(shares: dict[int, float]) -> int:
+def _primary_community_id(shares: Dict[int, float]) -> int:
     if not shares:
         return -1
     return sorted(shares.items(), key=lambda item: (-item[1], item[0]))[0][0]
 
 
-def _chain_participation(shares: dict[int, float]) -> float:
+def _chain_participation(shares: Dict[int, float]) -> float:
     if not shares:
         return 0.0
     return 1.0 - sum(share**2 for share in shares.values())
 
 
 def _build_chain_membership_rows(
-    chain_like_merchant_ids: set[str],
+    chain_like_merchant_ids: Set[str],
     statistics: PairStatistics,
-    candidate_community_shares: dict[str, dict[int, float]],
+    candidate_community_shares: Dict[str, Dict[int, float]],
     city_code: str,
-    category_chain_merchant_ids: set[str],
+    category_chain_merchant_ids: Set[str],
     chain_visit_count_threshold: int,
-) -> list[dict[str, str | int | float]]:
-    rows: list[dict[str, str | int | float]] = []
+) -> List[Dict[str, Union[str, int, float]]]:
+    rows: List[Dict[str, Union[str, int, float]]] = []
     for merchant_id in sorted(chain_like_merchant_ids):
         shares = candidate_community_shares.get(merchant_id, {})
         primary_community_id = _primary_community_id(shares)
@@ -274,9 +275,9 @@ def build_merchant_results(
     cleaning: CleaningResult,
     statistics: PairStatistics,
     anchor_config: AnchorConfig,
-    candidate_community_shares: dict[str, dict[int, float]],
-    chain_like_merchant_ids: set[str],
-    category_chain_merchant_ids: set[str],
+    candidate_community_shares: Dict[str, Dict[int, float]],
+    chain_like_merchant_ids: Set[str],
+    category_chain_merchant_ids: Set[str],
     chain_visit_count_threshold: int,
     city_code: str,
 ) -> pd.DataFrame:
@@ -285,13 +286,13 @@ def build_merchant_results(
         cleaning.graph,
         cleaning.partition,
     )
-    communities: dict[int, list[str]] = {}
+    communities: Dict[int, List[str]] = {}
     for merchant_id, community_id in cleaning.partition.items():
         if merchant_id in chain_like_merchant_ids:
             continue
         communities.setdefault(community_id, []).append(merchant_id)
 
-    centrality_by_merchant: dict[str, float] = {}
+    centrality_by_merchant: Dict[str, float] = {}
     for community_nodes in communities.values():
         subgraph = cleaning.graph.subgraph(community_nodes)
         if subgraph.number_of_edges() > 0:
@@ -302,7 +303,7 @@ def build_merchant_results(
                 {node: equal_score for node in community_nodes}
             )
 
-    rows: list[dict[str, str | int | float]] = []
+    rows: List[Dict[str, Union[str, int, float]]] = []
 
     for merchant_id, community_id in cleaning.partition.items():
         if merchant_id in chain_like_merchant_ids:
@@ -339,7 +340,7 @@ def build_merchant_results(
         chain_visit_count_threshold,
     )
     if not result.empty:
-        anchor_indices: list[int] = []
+        anchor_indices: List[int] = []
         for _, group in result.groupby("community_id", sort=True):
             if len(group) < anchor_config.minimum_community_size:
                 continue
@@ -461,7 +462,7 @@ def build_business_results(
         how="left",
     )
     timestamp = update_time.strftime("%Y-%m-%d %H:%M:%S")
-    rows: list[dict[str, str | int | float]] = []
+    rows: List[Dict[str, Union[str, int, float]]] = []
     output_merchant_column = (
         SOURCE_MERCHANT
         if SOURCE_MERCHANT in enriched.columns
@@ -580,16 +581,16 @@ def build_business_results(
 
 
 def _hourly_consistency(
-    community_merchants: set[str],
+    community_merchants: Set[str],
     visits: pd.DataFrame,
-) -> tuple[int, float]:
+) -> Tuple[int, float]:
     selected = visits[visits[MERCHANT].isin(community_merchants)].copy()
     hourly = pd.crosstab(selected[MERCHANT], selected[TIMESTAMP].dt.hour)
     hourly = hourly.reindex(columns=range(24), fill_value=0).astype(float)
     community_profile = hourly.sum(axis=0)
     peak_hour = int(community_profile.idxmax())
     profile_norm = float(math.sqrt((community_profile**2).sum()))
-    similarities: list[float] = []
+    similarities: List[float] = []
     for _, merchant_profile in hourly.iterrows():
         merchant_norm = float(math.sqrt((merchant_profile**2).sum()))
         if merchant_norm == 0 or profile_norm == 0:
@@ -608,7 +609,7 @@ def build_community_results(
     visits: pd.DataFrame,
     city_code: str,
 ) -> pd.DataFrame:
-    rows: list[dict[str, str | int | float]] = []
+    rows: List[Dict[str, Union[str, int, float]]] = []
     active = merchants[merchants["community_id"] >= 0]
     for community_id, group in active.groupby("community_id", sort=True):
         merchant_ids = set(group["merchant_id"].astype(str))

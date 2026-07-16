@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
+from typing import List, Set, Tuple
 
 import pandas as pd
 import spdbccc_data as sd
@@ -20,7 +21,9 @@ from business_district.config import (
 )
 from business_district.errors import TransactionDataError
 from business_district.pipeline import run_algorithm_one_from_transactions
-from business_district.resource_usage import record_resource_phase
+from business_district.probes import print_dataframe_probe, print_probe, print_series_probe
+# 线上任务暂不启用资源监测
+# from business_district.resource_usage import record_resource_phase
 from business_district.status_codes import format_status_code
 from business_district.transactions import RAW_TIMESTAMP, REGION, load_hive_transactions
 
@@ -35,8 +38,8 @@ TARGET_COLUMNS = [
     "previous_community_id",
     "region",
     "is_interfere",
-    "update_time",
     "is_abnormal",
+    "update_time",
     "is_position",
     "dt",
 ]
@@ -46,8 +49,8 @@ TARGET_SELECT_COLUMNS = [
     "previous_community_id",
     "region",
     "is_interfere",
-    "update_time",
     "is_abnormal",
+    "update_time",
     "is_position",
 ]
 PARAMETER_REQUIRED_COLUMNS = {
@@ -55,14 +58,13 @@ PARAMETER_REQUIRED_COLUMNS = {
     "end_date",
     "region",
     "max_transaction_time_interval",
-    "transaction_time_interval_weight",
     "min_transaction_number",
     "min_merchant_count",
     "is_daily",
 }
 
 
-def _split_hive_table(full_table_name: str) -> tuple[str, str]:
+def _split_hive_table(full_table_name: str) -> Tuple[str, str]:
     parts = full_table_name.strip().split(".")
     if len(parts) != 2 or not parts[0] or not parts[1]:
         raise ValueError(
@@ -89,22 +91,16 @@ def _hive_partition_part_files(
     partition_path: Path,
     table_name: str,
     dt_value: str,
-) -> list[Path]:
+) -> List[Path]:
     if not partition_path.exists():
-        raise TransactionDataError(
-            "Hive 分区目录不存在: "
-            f"table={table_name}, dt={dt_value}, path={partition_path}"
-        )
+        return []
     files = [
         path
         for path in sorted(partition_path.rglob("part*"))
         if path.is_file()
     ]
     if not files:
-        raise TransactionDataError(
-            "Hive 分区目录没有 part 文件: "
-            f"table={table_name}, dt={dt_value}, path={partition_path}"
-        )
+        return []
     return files
 
 
@@ -113,47 +109,68 @@ def _read_hive_part_file(
     table_name: str,
     dt_value: str,
 ) -> pd.DataFrame:
+    # print_probe(
+    #     "Hive分片读取开始",
+    #     f"table={table_name!r}, dt={dt_value!r}, path={str(file_path)!r}",
+    # )
     try:
-        return pd.read_parquet(file_path)
+        dataframe = pd.read_parquet(file_path)
     except (OSError, ValueError, ImportError) as error:
         raise TransactionDataError(
             "Hive 分片 parquet 读取失败: "
             f"table={table_name}, dt={dt_value}, path={file_path}, reason={error}"
         ) from error
+    # print_dataframe_probe("Hive分片读取完成", dataframe)
+    return dataframe
 
 
 def _with_partition_dt(dataframe: pd.DataFrame, dt_value: str) -> pd.DataFrame:
-    if "dt" in dataframe.columns:
-        return dataframe
     result = dataframe.copy()
-    result["dt"] = dt_value
+    result["dt"] = str(dt_value)
     return result
 
 
 def read_partitioned_hive_table(
     table_name: str,
-    dt_values: list[str],
+    dt_values: List[str],
 ) -> pd.DataFrame:
     if not dt_values:
         raise TransactionDataError(f"Hive 读表 dt 不能为空: table={table_name}")
 
-    dataframes: list[pd.DataFrame] = []
+    # print_probe(
+    #     "Hive分区表读取开始",
+    #     f"table={table_name!r}, dt_values={dt_values!r}",
+    # )
+    dataframes: List[pd.DataFrame] = []
     for dt_value in dt_values:
         dt_text = str(dt_value)
         partition_path = _hive_partition_path(table_name, dt_text)
+        partition_dataframes: List[pd.DataFrame] = []
         for file_path in _hive_partition_part_files(
             partition_path,
             table_name,
             dt_text,
         ):
-            dataframes.append(
-                _with_partition_dt(
-                    _read_hive_part_file(file_path, table_name, dt_text),
-                    dt_text,
-                )
+            dataframe = _read_hive_part_file(file_path, table_name, dt_text)
+            if dataframe.empty:
+                continue
+            partition_dataframes.append(
+                _with_partition_dt(dataframe, dt_text)
             )
+        if not partition_dataframes:
+            continue
+        dataframes.extend(partition_dataframes)
 
-    return pd.concat(dataframes, ignore_index=True, copy=False)
+    if not dataframes:
+        raise TransactionDataError(
+            "Hive 日期范围内没有非空分区: "
+            f"table={table_name}, dt_values={dt_values}"
+        )
+
+    # print_probe("Hive分片合并开始", f"part_count={len(dataframes)}")
+    result = pd.concat(dataframes, ignore_index=True, copy=False)
+    # print_dataframe_probe("Hive分片合并完成", result)
+    return result
 
 
 @dataclass(frozen=True)
@@ -182,7 +199,6 @@ class HiveAlgorithmParameter:
     end_exclusive: pd.Timestamp
     region: str
     max_transaction_time_interval: int
-    transaction_time_interval_weight: float
     min_transaction_number: int
     min_merchant_count: int
     is_daily: bool
@@ -199,7 +215,7 @@ def _require_parameter_columns(
     table_name: str,
 ) -> pd.DataFrame:
     result = dataframe.copy()
-    result.columns = result.columns.astype("string").str.strip()
+    # result.columns = result.columns.astype("string").str.strip()
     missing_columns = sorted(PARAMETER_REQUIRED_COLUMNS.difference(set(result.columns)))
     if missing_columns:
         raise TransactionDataError(
@@ -221,23 +237,6 @@ def _parse_positive_int(value: object, column: str, table_name: str) -> int:
     if parsed < 1:
         raise TransactionDataError(
             "Hive 参数表字段必须是正整数: "
-            f"table={table_name}, column={column}, value={text!r}"
-        )
-    return parsed
-
-
-def _parse_positive_float(value: object, column: str, table_name: str) -> float:
-    text = _clean_text(value)
-    try:
-        parsed = float(text)
-    except ValueError as error:
-        raise TransactionDataError(
-            "Hive 参数表字段必须是正数: "
-            f"table={table_name}, column={column}, value={text!r}"
-        ) from error
-    if parsed <= 0.0:
-        raise TransactionDataError(
-            "Hive 参数表字段必须是正数: "
             f"table={table_name}, column={column}, value={text!r}"
         )
     return parsed
@@ -274,9 +273,9 @@ def _has_time_component(value: object) -> bool:
 def load_hive_algorithm_parameters(
     parameter_data: pd.DataFrame,
     parameter_table: str,
-) -> list[HiveAlgorithmParameter]:
+) -> List[HiveAlgorithmParameter]:
     source = _require_parameter_columns(parameter_data, parameter_table)
-    parameters: list[HiveAlgorithmParameter] = []
+    parameters: List[HiveAlgorithmParameter] = []
     for row in source.to_dict("records"):
         region = _clean_text(row["region"])
         if not region:
@@ -311,11 +310,6 @@ def load_hive_algorithm_parameters(
                     "max_transaction_time_interval",
                     parameter_table,
                 ),
-                transaction_time_interval_weight=_parse_positive_float(
-                    row["transaction_time_interval_weight"],
-                    "transaction_time_interval_weight",
-                    parameter_table,
-                ),
                 min_transaction_number=_parse_positive_int(
                     row["min_transaction_number"],
                     "min_transaction_number",
@@ -339,8 +333,9 @@ def load_hive_algorithm_parameters(
 
 
 def build_runtime_config(
-    parameters: list[HiveAlgorithmParameter],
+    parameters: List[HiveAlgorithmParameter],
     parameter_table: str,
+    decay_tau_minutes: float,
 ) -> AlgorithmRuntimeConfig:
     first = parameters[0]
     inconsistent = [
@@ -349,8 +344,6 @@ def build_runtime_config(
         if (
             parameter.max_transaction_time_interval
             != first.max_transaction_time_interval
-            or parameter.transaction_time_interval_weight
-            != first.transaction_time_interval_weight
             or parameter.min_transaction_number != first.min_transaction_number
             or parameter.min_merchant_count != first.min_merchant_count
         )
@@ -363,14 +356,14 @@ def build_runtime_config(
         )
     return AlgorithmRuntimeConfig(
         window_minutes=first.max_transaction_time_interval,
-        decay_tau_minutes=first.transaction_time_interval_weight,
+        decay_tau_minutes=decay_tau_minutes,
         minimum_unique_users=first.min_transaction_number,
         minimum_community_size=first.min_merchant_count,
     )
 
 
-def build_source_dt_list(parameters: list[HiveAlgorithmParameter]) -> list[str]:
-    dates: set[str] = set()
+def build_source_dt_list(parameters: List[HiveAlgorithmParameter]) -> List[str]:
+    dates: Set[str] = set()
     for parameter in parameters:
         for day in pd.date_range(
             parameter.start_date.normalize(),
@@ -383,17 +376,18 @@ def build_source_dt_list(parameters: list[HiveAlgorithmParameter]) -> list[str]:
 
 def _parse_transaction_time(
     values: pd.Series,
-    timestamp_formats: tuple[str, ...],
+    timestamp_formats: Tuple[str, ...],
     table_name: str,
 ) -> pd.Series:
     parsed = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
-    text_values = values.astype("string").str.strip()
+    # print_series_probe("Hive参数过滤交易时间输入", values)
+    # text_values = values.astype("string").str.strip()
     for timestamp_format in timestamp_formats:
         missing = parsed.isna()
         if not missing.any():
             break
         parsed.loc[missing] = pd.to_datetime(
-            text_values.loc[missing],
+            values.loc[missing],
             format=timestamp_format,
             errors="coerce",
         )
@@ -404,18 +398,20 @@ def _parse_transaction_time(
             "Hive 输入表交易时间解析失败: "
             f"table={table_name}, invalid_rows={int(invalid.sum())}, examples={examples}"
         )
+    # print_series_probe("Hive参数过滤交易时间解析完成", parsed)
     return parsed
 
 
 def filter_source_data_by_parameters(
     source_data: pd.DataFrame,
-    parameters: list[HiveAlgorithmParameter],
-    timestamp_formats: tuple[str, ...],
+    parameters: List[HiveAlgorithmParameter],
+    timestamp_formats: Tuple[str, ...],
     source_table: str,
     parameter_table: str,
 ) -> pd.DataFrame:
+    print_dataframe_probe("Hive参数过滤输入", source_data)
     source = source_data.copy()
-    source.columns = source.columns.astype("string").str.strip()
+    # source.columns = source.columns.astype("string").str.strip()
     missing_columns = sorted({REGION, RAW_TIMESTAMP}.difference(set(source.columns)))
     if missing_columns:
         raise TransactionDataError(
@@ -429,7 +425,7 @@ def filter_source_data_by_parameters(
         source_table,
     )
     matched = pd.Series(False, index=source.index)
-    source_region = source[REGION].astype("string").str.strip()
+    source_region = source[REGION]
     for parameter in parameters:
         matched = matched | (
             source_region.eq(parameter.region)
@@ -437,6 +433,7 @@ def filter_source_data_by_parameters(
             & transaction_time.lt(parameter.end_exclusive)
         )
     result = source.loc[matched].copy()
+    print_dataframe_probe("Hive参数过滤结果", result)
     if result.empty:
         raise TransactionDataError(
             "Hive 参数表没有匹配到输入交易: "
@@ -458,6 +455,7 @@ def _format_abnormal_status(value: object) -> str:
 
 def build_hive_target_output(
     business_results: pd.DataFrame,
+    output_dt: str,
 ) -> pd.DataFrame:
     output = business_results[
         [
@@ -469,7 +467,6 @@ def build_hive_target_output(
             "update_time",
             "status",
             "is_position",
-            "dt",
         ]
     ].copy()
     output["storename"] = output["storename"].astype(str)
@@ -480,11 +477,64 @@ def build_hive_target_output(
     output["update_time"] = output["update_time"].astype(str)
     output["is_abnormal"] = output["status"].map(_format_abnormal_status)
     output["is_position"] = output["is_position"].astype(int)
-    output["dt"] = output["dt"].astype(str)
+    output["dt"] = str(output_dt)
     output = output.drop(columns=["status"])
     output = output[TARGET_COLUMNS]
-    output = output[output["dt"] != ""].copy()
     return output.reset_index(drop=True)
+
+
+# def overwrite_target_table(
+#     sd: ModuleType,
+#     result: pd.DataFrame,
+#     table_name: str,
+#     temp_table_name: str,
+#     output_dt: str,
+# ) -> None:
+#     if result.empty:
+#         return
+
+#     target_select_columns = ", ".join(
+#         f"target.{column}" for column in TARGET_SELECT_COLUMNS
+#     )
+#     source_select_columns = ", ".join(
+#         f"source.{column}" for column in TARGET_SELECT_COLUMNS
+#     )
+#     merged_select_columns = ", ".join(TARGET_SELECT_COLUMNS)
+#     merged_temp_table_name = f"{temp_table_name}_merged"
+#     write_df = result[TARGET_SELECT_COLUMNS].reset_index(drop=True)
+#     sd.execute_sql(f"drop table if exists {temp_table_name}")
+#     sd.execute_sql(f"drop table if exists {merged_temp_table_name}")
+#     try:
+#         sd.write_table(write_df, temp_table_name, debug=False, dt=None)
+#         sd.execute_sql(
+#             f"""
+#             create table {merged_temp_table_name} as
+#             select {target_select_columns}
+#             from {table_name} target
+#             left join (
+#                 select distinct region
+#                 from {temp_table_name}
+#             ) source_regions
+#             on target.region = source_regions.region
+#             where target.dt = {output_dt}
+#               and source_regions.region is null
+#             union all
+#             select {source_select_columns}
+#             from {temp_table_name} source
+#             """
+#         )
+#         sd.execute_sql(
+#             f"""
+#             insert overwrite table {table_name}
+#             partition (dt={output_dt})
+#             select {merged_select_columns}
+#             from {merged_temp_table_name}
+#             """
+#         )
+#     finally:
+#         sd.execute_sql(f"drop table if exists {merged_temp_table_name}")
+#         sd.execute_sql(f"drop table if exists {temp_table_name}")
+
 
 
 def overwrite_target_table(
@@ -492,52 +542,26 @@ def overwrite_target_table(
     result: pd.DataFrame,
     table_name: str,
     temp_table_name: str,
+    output_dt: str,
 ) -> None:
     if result.empty:
         return
 
-    target_select_columns = ", ".join(
-        f"target.{column}" for column in TARGET_SELECT_COLUMNS
-    )
-    source_select_columns = ", ".join(
-        f"source.{column}" for column in TARGET_SELECT_COLUMNS
-    )
-    merged_select_columns = ", ".join(TARGET_SELECT_COLUMNS)
-    merged_temp_table_name = f"{temp_table_name}_merged"
-    for dt_value, partition_df in result.groupby("dt", sort=True):
-        write_df = partition_df.drop(columns=["dt"]).reset_index(drop=True)
+    select_columns = ", ".join(TARGET_SELECT_COLUMNS)
+    write_df = result[TARGET_SELECT_COLUMNS].reset_index(drop=True)
+    sd.execute_sql(f"drop table if exists {temp_table_name}")
+    try:
+        sd.write_table(write_df, temp_table_name, debug=False, dt=None)
+        sd.execute_sql(
+            f"""
+            insert overwrite table {table_name}
+            partition (dt={output_dt})
+            select {select_columns}
+            from {temp_table_name}
+            """
+        )
+    finally:
         sd.execute_sql(f"drop table if exists {temp_table_name}")
-        sd.execute_sql(f"drop table if exists {merged_temp_table_name}")
-        try:
-            sd.write_table(write_df, temp_table_name, debug=False, dt=None)
-            sd.execute_sql(
-                f"""
-                create table {merged_temp_table_name} as
-                select {target_select_columns}
-                from {table_name} target
-                left join (
-                    select distinct region
-                    from {temp_table_name}
-                ) source_regions
-                on target.region = source_regions.region
-                where target.dt = {dt_value}
-                  and source_regions.region is null
-                union all
-                select {source_select_columns}
-                from {temp_table_name} source
-                """
-            )
-            sd.execute_sql(
-                f"""
-                insert overwrite table {table_name}
-                partition (dt={dt_value})
-                select {merged_select_columns}
-                from {merged_temp_table_name}
-                """
-            )
-        finally:
-            sd.execute_sql(f"drop table if exists {merged_temp_table_name}")
-            sd.execute_sql(f"drop table if exists {temp_table_name}")
 
 
 class TaskMain:
@@ -551,15 +575,13 @@ class TaskMain:
     def taskrun(self) -> HiveTaskSummary:
         try:
             total_start = time.time()
-            self.dt_var = str(dtDate.dt_date(self.task_config.dt_expression))
+            self.dt_var = dtDate.dt_date(self.task_config.dt_expression)
             logrecord.log_data(f"task dt={self.dt_var}")
             parameter_dt_list = [self.dt_var]
             parameter_data = sd.read_table(
                 self.task_config.parameter_table,
                 dt=parameter_dt_list,
             )
-            record_resource_phase("Hive参数表读取")
-            parameter_data.columns = parameter_data.columns.astype("string").str.strip()
             parameters = load_hive_algorithm_parameters(
                 parameter_data,
                 self.task_config.parameter_table,
@@ -567,12 +589,12 @@ class TaskMain:
             runtime_config = build_runtime_config(
                 parameters,
                 self.task_config.parameter_table,
+                self.task_config.algorithm_config.cooccurrence.decay_tau_minutes,
             )
             config = apply_runtime_parameters(
                 self.task_config.algorithm_config,
                 runtime_config,
             )
-            record_resource_phase("Hive参数解析")
             source_dt_list = build_source_dt_list(parameters)
             logrecord.log_data(
                 f"task parameter_dt={parameter_dt_list}, source_dt={source_dt_list}"
@@ -581,23 +603,19 @@ class TaskMain:
                 self.task_config.source_table,
                 source_dt_list,
             )
-            record_resource_phase("Hive输入表读取")
-            source_data.columns = source_data.columns.astype("string").str.strip()
             filtered_source_data = filter_source_data_by_parameters(
                 source_data,
                 parameters,
                 config.input.timestamp_formats,
                 self.task_config.source_table,
-                self.task_config.parameter_table,
+                self.task_config.parameter_table
             )
-            record_resource_phase("Hive输入过滤")
             transactions = load_hive_transactions(
                 filtered_source_data,
                 config.input.timestamp_formats,
                 self.dt_var,
                 self.task_config.source_table,
             )
-            record_resource_phase("Hive交易转换")
             result = run_algorithm_one_from_transactions(
                 config,
                 transactions,
@@ -609,15 +627,15 @@ class TaskMain:
             )
             target_output = build_hive_target_output(
                 result.business_results,
+                self.dt_var,
             )
-            record_resource_phase("Hive输出构建")
             overwrite_target_table(
                 sd,
                 target_output,
                 self.task_config.target_table,
                 self.task_config.target_temp_table,
+                self.dt_var,
             )
-            record_resource_phase("Hive结果写入")
             logrecord.log_data(
                 f"taskrun seconds={time.time() - total_start:.2f}, "
                 f"output_rows={len(target_output)}, "
@@ -630,7 +648,7 @@ class TaskMain:
                 output_directory=result.summary.output_directory,
                 target_table=self.task_config.target_table,
             )
-        except Exception:
+        except Exception as error:
             formattedExc.formatted_exc()
             raise
 
@@ -638,15 +656,11 @@ class TaskMain:
         return summary
 
     def destroy(self) -> None:
-        errors: list[Exception] = []
-        table_names = [
-            f"{self.task_config.target_temp_table}_merged",
-            self.task_config.target_temp_table,
-        ]
+        errors: List[Exception] = []
+        table_names = self.task_config.target_temp_table
         for table_name in table_names:
             try:
                 sd.execute_sql(f"drop table if exists {table_name}")
-                record_resource_phase("Hive任务清理")
             except Exception as error:
                 errors.append(error)
                 logrecord.log_data(
