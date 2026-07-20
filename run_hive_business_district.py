@@ -87,7 +87,7 @@ def build_algorithm_config(
         cooccurrence=CooccurrenceConfig(
             window_minutes=120,
             decay_tau_minutes=60.0,
-            minimum_unique_users=2,
+            minimum_unique_users=3,
         ),
         graph=graph_config,
         community=CommunityConfig(
@@ -101,7 +101,7 @@ def build_algorithm_config(
             minimum_count=3,
             maximum_count=10,
             merchants_per_anchor=20,
-            minimum_community_size=1,
+            minimum_community_size=5,
             maximum_participation=0.1,
             chain_visit_count_quantile=0.9,
             chain_minimum_visit_count=100,

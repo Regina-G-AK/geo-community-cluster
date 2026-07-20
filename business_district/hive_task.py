@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import List, Set, Tuple
+from typing import Iterator, List, Set, Tuple
 
 import pandas as pd
 import spdbccc_data as sd
@@ -134,23 +134,17 @@ def _with_partition_dt(dataframe: pd.DataFrame, dt_value: str) -> pd.DataFrame:
     return result
 
 
-def read_partitioned_hive_table(
+def _iter_partitioned_hive_table_parts(
     table_name: str,
     dt_values: List[str],
-) -> pd.DataFrame:
+) -> Iterator[Tuple[pd.DataFrame, str]]:
     if not dt_values:
         raise TransactionDataError(f"Hive 读表 dt 不能为空: table={table_name}")
 
-    # print_probe(
-    #     "Hive分区表读取开始",
-    #     f"table={table_name!r}, dt_values={dt_values!r}",
-    # )
-    dataframes: List[pd.DataFrame] = []
     for dt_value in dt_values:
         dt_text = str(dt_value)
         _prepare_hive_partition(table_name, dt_text)
         partition_path = _hive_partition_path(table_name, dt_text)
-        partition_dataframes: List[pd.DataFrame] = []
         for file_path in _hive_partition_part_files(
             partition_path,
             table_name,
@@ -159,12 +153,24 @@ def read_partitioned_hive_table(
             dataframe = _read_hive_part_file(file_path, table_name, dt_text)
             if dataframe.empty:
                 continue
-            partition_dataframes.append(
-                _with_partition_dt(dataframe, dt_text)
-            )
-        if not partition_dataframes:
-            continue
-        dataframes.extend(partition_dataframes)
+            yield dataframe, dt_text
+
+
+def read_partitioned_hive_table(
+    table_name: str,
+    dt_values: List[str],
+) -> pd.DataFrame:
+    # print_probe(
+    #     "Hive分区表读取开始",
+    #     f"table={table_name!r}, dt_values={dt_values!r}",
+    # )
+    dataframes = [
+        _with_partition_dt(dataframe, dt_text)
+        for dataframe, dt_text in _iter_partitioned_hive_table_parts(
+            table_name,
+            dt_values,
+        )
+    ]
 
     if not dataframes:
         raise TransactionDataError(
@@ -408,17 +414,17 @@ def _parse_transaction_time(
     return parsed
 
 
-def filter_source_data_by_parameters(
+def _select_source_data_by_parameters(
     source_data: pd.DataFrame,
     parameters: List[HiveAlgorithmParameter],
     timestamp_formats: Tuple[str, ...],
     source_table: str,
     parameter_table: str,
 ) -> pd.DataFrame:
-    print_dataframe_probe("Hive参数过滤输入", source_data)
-    source = source_data.copy()
     # source.columns = source.columns.astype("string").str.strip()
-    missing_columns = sorted({REGION, RAW_TIMESTAMP}.difference(set(source.columns)))
+    missing_columns = sorted(
+        {REGION, RAW_TIMESTAMP}.difference(set(source_data.columns))
+    )
     if missing_columns:
         raise TransactionDataError(
             "Hive 输入表缺少参数表关联字段: "
@@ -426,27 +432,87 @@ def filter_source_data_by_parameters(
             f"missing_columns={missing_columns}"
         )
     transaction_time = _parse_transaction_time(
-        source[RAW_TIMESTAMP],
+        source_data[RAW_TIMESTAMP],
         timestamp_formats,
         source_table,
     )
-    matched = pd.Series(False, index=source.index)
-    source_region = source[REGION]
+    matched = pd.Series(False, index=source_data.index)
+    source_region = source_data[REGION]
     for parameter in parameters:
         matched = matched | (
             source_region.eq(parameter.region)
             & transaction_time.ge(parameter.start_date)
             & transaction_time.lt(parameter.end_exclusive)
         )
-    result = source.loc[matched].copy()
-    print_dataframe_probe("Hive参数过滤结果", result)
+    return source_data.loc[matched].copy()
+
+
+def filter_source_data_by_parameters(
+    source_data: pd.DataFrame,
+    parameters: List[HiveAlgorithmParameter],
+    timestamp_formats: Tuple[str, ...],
+    source_table: str,
+    parameter_table: str,
+) -> pd.DataFrame:
+    # print_dataframe_probe("Hive参数过滤输入", source_data)
+    result = _select_source_data_by_parameters(
+        source_data,
+        parameters,
+        timestamp_formats,
+        source_table,
+        parameter_table,
+    )
+    # print_dataframe_probe("Hive参数过滤结果", result)
     if result.empty:
         raise TransactionDataError(
             "Hive 参数表没有匹配到输入交易: "
             f"source_table={source_table}, parameter_table={parameter_table}, "
-            f"parameter_count={len(parameters)}, source_rows={len(source)}"
+            f"parameter_count={len(parameters)}, source_rows={len(source_data)}"
         )
     return result.reset_index(drop=True)
+
+
+def read_filtered_source_hive_table(
+    table_name: str,
+    dt_values: List[str],
+    parameters: List[HiveAlgorithmParameter],
+    timestamp_formats: Tuple[str, ...],
+    parameter_table: str,
+) -> pd.DataFrame:
+    dataframes: List[pd.DataFrame] = []
+    source_rows = 0
+    for dataframe, dt_text in _iter_partitioned_hive_table_parts(
+        table_name,
+        dt_values,
+    ):
+        source_rows += len(dataframe)
+        filtered = _select_source_data_by_parameters(
+            dataframe,
+            parameters,
+            timestamp_formats,
+            table_name,
+            parameter_table,
+        )
+        if filtered.empty:
+            continue
+        filtered = _with_partition_dt(filtered, dt_text)
+        dataframes.append(filtered)
+
+    if source_rows == 0:
+        raise TransactionDataError(
+            "Hive 日期范围内没有非空分区: "
+            f"table={table_name}, dt_values={dt_values}"
+        )
+    if not dataframes:
+        raise TransactionDataError(
+            "Hive 参数表没有匹配到输入交易: "
+            f"source_table={table_name}, parameter_table={parameter_table}, "
+            f"parameter_count={len(parameters)}, source_rows={source_rows}"
+        )
+
+    result = pd.concat(dataframes, ignore_index=True, copy=False)
+    # print_dataframe_probe("Hive参数过滤结果", result)
+    return result
 
 
 def _format_hive_id(value: object) -> str:
@@ -605,16 +671,12 @@ class TaskMain:
             logrecord.log_data(
                 f"task parameter_dt={parameter_dt_list}, source_dt={source_dt_list}"
             )
-            source_data = read_partitioned_hive_table(
+            filtered_source_data = read_filtered_source_hive_table(
                 self.task_config.source_table,
                 source_dt_list,
-            )
-            filtered_source_data = filter_source_data_by_parameters(
-                source_data,
                 parameters,
                 config.input.timestamp_formats,
-                self.task_config.source_table,
-                self.task_config.parameter_table
+                self.task_config.parameter_table,
             )
             transactions = load_hive_transactions(
                 filtered_source_data,
@@ -662,20 +724,15 @@ class TaskMain:
         return summary
 
     def destroy(self) -> None:
-        errors: List[Exception] = []
-        table_names = self.task_config.target_temp_table
-        for table_name in table_names:
-            try:
-                sd.execute_sql(f"drop table if exists {table_name}")
-            except Exception as error:
-                errors.append(error)
-                logrecord.log_data(
-                    f"drop temp table failed table={table_name}, error={error}"
-                )
-        if errors:
+        try:
+            sd.execute_sql(
+                f"drop table if exists {self.task_config.target_temp_table}"
+            )
+        except Exception as error:
             raise RuntimeError(
-                f"Hive 临时表清理失败: failed_count={len(errors)}"
-            ) from errors[-1]
+                "Hive 临时表清理失败: "
+                f"table={self.task_config.target_temp_table}"
+            ) from error
 
 
 def run_hive_task(task_config: HiveTaskConfig) -> HiveTaskSummary:

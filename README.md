@@ -16,7 +16,7 @@
 
 Hive 任务通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再根据参数表中的 `start_date`、`end_date` 自动计算涉及月份的最后一天，读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应月末分区。例如参数范围跨越 2026 年 1 月和 2 月时，读取 `dt=20260131`、`dt=20260228`，交易数据仍按参数中的实际起止时间和 `region` 过滤。交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供，其余静态算法参数由 notebook 提供。结果统一写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的 T-1 分区；初始化任务会保留该分区内其他 `region` 的已有结果，并用本次结果替换相同 `region` 的已有结果，不再写入风险商户表。
 
-Hive 初始化入口的交易输入表会按 `/appdata/project/fid_bg_icmp/tbl/{表名}/dt={日期}/part*` 分片读取 parquet 文件并合并；`dt` 统一使用分区路径中的日期，即使分片内自带 `dt` 列也会覆盖。日期范围内缺少目录、没有 `part*` 文件或分片全部为空的分区会被跳过；如果全部日期均无有效数据，任务会明确报错。
+Hive 初始化入口的交易输入表会按 `/appdata/project/fid_bg_icmp/tbl/{表名}/dt={日期}/part*` 分片读取 parquet 文件；每个分片会先按参数表的 `region` 和实际交易时间范围筛选，只有命中行才参与最终合并，以降低合并时的峰值内存。`dt` 统一使用分区路径中的日期，即使分片内自带 `dt` 列也会覆盖。日期范围内缺少目录、没有 `part*` 文件或分片全部为空的分区会被跳过；如果全部日期均无有效数据，或所有分片均没有匹配参数的交易，任务会明确报错。
 
 可以使用独立脚本验证挂载目录和 Hive parquet 分片读取，不运行聚类和写表逻辑。脚本会在读表成功或失败后执行 `taskfinish.finish_task()` 完成平台任务收尾。`scripts/test_hive_partition_read.py` 默认自动读取最近一个已结束月份的最后一天分区，同时可在顶部 `CONFIG` 中修改表根目录、表名、分区日期和预览行数。
 

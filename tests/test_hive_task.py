@@ -178,6 +178,87 @@ def test_read_partitioned_hive_table_rejects_all_empty_partitions(
         )
 
 
+def test_read_filtered_source_hive_table_filters_each_part_before_concat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("business_district.hive_task")
+    monkeypatch.setattr(hive_task, "HIVE_TABLE_ROOT", tmp_path)
+    partition = tmp_path / "input_table" / "dt=20260131"
+    partition.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "storename": "first-match",
+                "transaction_time": "20260102T100000",
+                "region": "shanghai",
+            },
+            {
+                "storename": "wrong-region",
+                "transaction_time": "20260102T100000",
+                "region": "beijing",
+            },
+        ]
+    ).to_parquet(partition / "part-000.parquet", index=False)
+    pd.DataFrame(
+        [
+            {
+                "storename": "second-match",
+                "transaction_time": "20260103T100000",
+                "region": "shanghai",
+            },
+            {
+                "storename": "out-of-range",
+                "transaction_time": "20260104T000000",
+                "region": "shanghai",
+            },
+        ]
+    ).to_parquet(partition / "part-001.parquet", index=False)
+    parameters = [
+        hive_task.HiveAlgorithmParameter(
+            start_date=pd.Timestamp("2026-01-02"),
+            end_date=pd.Timestamp("2026-01-03"),
+            end_exclusive=pd.Timestamp("2026-01-04"),
+            region="shanghai",
+            max_transaction_time_interval=30,
+            min_transaction_number=2,
+            min_merchant_count=3,
+            is_daily=False,
+        )
+    ]
+    original_concat = hive_task.pd.concat
+    concat_storenames: list[list[str]] = []
+
+    def concat_filtered_parts(
+        dataframes: list[pd.DataFrame],
+        ignore_index: bool,
+        copy: bool,
+    ) -> pd.DataFrame:
+        concat_storenames.extend(
+            dataframe["storename"].tolist() for dataframe in dataframes
+        )
+        return original_concat(
+            dataframes,
+            ignore_index=ignore_index,
+            copy=copy,
+        )
+
+    monkeypatch.setattr(hive_task.pd, "concat", concat_filtered_parts)
+
+    result = hive_task.read_filtered_source_hive_table(
+        "dev_icamp.input_table",
+        ["20260131"],
+        parameters,
+        ("%Y%m%dT%H%M%S",),
+        "param_table",
+    )
+
+    assert concat_storenames == [["first-match"], ["second-match"]]
+    assert result["storename"].tolist() == ["first-match", "second-match"]
+    assert result["dt"].tolist() == ["20260131", "20260131"]
+
+
 def test_hive_target_output_formats_status_as_dict_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -346,11 +427,17 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
             return parameter_data.copy()
         raise AssertionError(f"unexpected table={table_name}")
 
-    def read_partitioned_hive_table(
+    def read_filtered_source_hive_table(
         table_name: str,
         dt_values: list[str],
+        parameters: list[object],
+        timestamp_formats: tuple[str, ...],
+        parameter_table: str,
     ) -> pd.DataFrame:
         partition_reads.append((table_name, dt_values))
+        assert len(parameters) == 1
+        assert timestamp_formats == ("%Y%m%dT%H%M%S",)
+        assert parameter_table == "param_table"
         if table_name == "source_table":
             return source_data.copy()
         raise AssertionError(f"parameter table must use sd.read_table: {table_name}")
@@ -390,8 +477,8 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
     monkeypatch.setattr(hive_task, "sd", types.SimpleNamespace(read_table=read_table))
     monkeypatch.setattr(
         hive_task,
-        "read_partitioned_hive_table",
-        read_partitioned_hive_table,
+        "read_filtered_source_hive_table",
+        read_filtered_source_hive_table,
     )
     monkeypatch.setattr(
         hive_task,
