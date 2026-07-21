@@ -10,13 +10,21 @@
 
 `RuntimeConfig.process_count` 配置工作进程数，必须是不小于 `1` 的整数；notebook 当前使用 `4`。初始化聚类会按卡号分片并行计算商户对统计，增量归属会按候选商户分片并行计算图与地理评分。设置为 `1` 时使用相同的串行计算逻辑，适合小数据量运行。
 
-每次运行会直接在 `[output].directory` 下写入 `pair_statistics_{region}.pkl` 商户对中间文件，其中 `region` 使用 `[city].code`。
+每次运行会直接在 `[output].directory` 下写入 `pair_statistics_{region}.pkl` 商户对中间文件，其中 `region` 使用 `[city].code`。文件使用 Python pickle protocol 4，顶层对象为 `business_district.graph.PairStatistics`，包含以有序商户二元组为键的 `strengths`、同键的 `supports`，以及以商户 ID 为键的 `merchant_visit_counts`；该格式可由项目要求的 Python 3.7 读取。
+
+可以使用独立诊断脚本分析该中间文件。分析逻辑只依赖 Python 标准库，不导入项目业务模块；任务入口使用线上环境提供的 `spdbccc_data` 执行挂载检查、运行、销毁和 `finish_task()` 收尾。脚本会复算最小支持人数、SPPMI、z-score、互为 top-k 和访问量型连锁商户删除等阶段，并直接打印总体摘要、分布、连通分量和重点商户指标。由于中间文件不包含商户分类和坐标，脚本不能复算分类 `2` 商户删除、地理种子边和疑似线上商户识别。pickle 文件只应来自可信任务输出。
+
+```powershell
+python scripts/analyze_pair_statistics.py
+```
+
+输入路径、图参数、访问量型商户阈值和重点商户输出数量集中定义在 `scripts/analyze_pair_statistics.py` 顶部；默认基于脚本位置读取项目根目录下的 `algorithm_one_output/pair_statistics_shanghai.pkl`，不受任务启动工作目录影响。打印的 JSON 统计覆盖全部商户，每类重点商户默认展示前 `50` 名。分析时直接校验中间文件中的原始字典，只为重点商户生成明细，孤立商户使用计数参与分布统计，避免大规模数据下复制全部商户和商户对。
 
 线上 Jupyter 入口和独立 Python 入口当前均不启用资源监测，不会启动 `tracemalloc` 或读取 `/proc/self/status`；资源监测模块保留供本地排查使用。
 
-Hive 任务通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再根据参数表中的 `start_date`、`end_date` 自动计算涉及月份的最后一天，读取并过滤 `dev_icamp.icamp_merchant_cluster_algo_input` 对应月末分区。例如参数范围跨越 2026 年 1 月和 2 月时，读取 `dt=20260131`、`dt=20260228`，交易数据仍按参数中的实际起止时间和 `region` 过滤。交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供，其余静态算法参数由 notebook 提供。结果统一写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的 T-1 分区；初始化任务会保留该分区内其他 `region` 的已有结果，并用本次结果替换相同 `region` 的已有结果，不再写入风险商户表。
+Hive 任务通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再根据参数表中的 `start_date`、`end_date` 自动计算涉及月份的最后一天，读取 `dev_icamp.icamp_merchant_cluster_algo_input` 对应月末分区。例如参数范围跨越 2026 年 1 月和 2 月时，读取 `dt=20260131`、`dt=20260228`。初始化任务对这些分区内的交易只按 `region` 过滤，不再判断 `transaction_time` 是否位于 `start_date` 和 `end_date` 之间；增量归属任务仍按实际起止时间和 `region` 过滤。交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供，其余静态算法参数由 notebook 提供。结果统一写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的 T-1 分区；初始化任务会保留该分区内其他 `region` 的已有结果，并用本次结果替换相同 `region` 的已有结果，不再写入风险商户表。
 
-Hive 初始化入口的交易输入表会按 `/appdata/project/fid_bg_icmp/tbl/{表名}/dt={日期}/part*` 分片读取 parquet 文件；每个分片会先按参数表的 `region` 和实际交易时间范围筛选，只有命中行才参与最终合并，以降低合并时的峰值内存。`dt` 统一使用分区路径中的日期，即使分片内自带 `dt` 列也会覆盖。日期范围内缺少目录、没有 `part*` 文件或分片全部为空的分区会被跳过；如果全部日期均无有效数据，或所有分片均没有匹配参数的交易，任务会明确报错。
+Hive 初始化入口的交易输入表会按 `/appdata/project/fid_bg_icmp/tbl/{表名}/dt={日期}/part*` 分片读取 parquet 文件；每个分片会先按参数表的 `region` 筛选，只有命中行才参与最终合并，以降低合并时的峰值内存。`dt` 统一使用分区路径中的日期，即使分片内自带 `dt` 列也会覆盖。日期范围内缺少目录、没有 `part*` 文件或分片全部为空的分区会被跳过；如果全部日期均无有效数据，或所有分片均没有匹配 `region` 的交易，任务会明确报错。
 
 可以使用独立脚本验证挂载目录和 Hive parquet 分片读取，不运行聚类和写表逻辑。脚本会在读表成功或失败后执行 `taskfinish.finish_task()` 完成平台任务收尾。`scripts/test_hive_partition_read.py` 默认自动读取最近一个已结束月份的最后一天分区，同时可在顶部 `CONFIG` 中修改表根目录、表名、分区日期和预览行数。
 
@@ -117,7 +125,7 @@ Hive 参数表 `dev_icamp.icamp_merchant_cluster_algo_param` 必须包含：
 - `min_merchant_count`
 - `is_daily`
 
-入口会用参数表的 `region` 和交易表 `region` 关联，并用 `transaction_time` 落在 `[start_date, end_date]` 的记录作为本次算法输入。`is_daily` 取值只能是 `0` 或 `1`，其中 `1` 表示增量归属，`0` 表示初始化聚类。`max_transaction_time_interval` 映射到共现窗口分钟数，`min_transaction_number` 映射到最小支持交易人数，`min_merchant_count` 映射到有效商圈最小商户数。同一任务分区内多行参数必须使用相同算法参数，否则任务会报错。交易时间衰减参数不再从参数表读取，初始化和增量任务统一使用 notebook 中的 `algorithm_config.cooccurrence.decay_tau_minutes`。
+初始化入口会用参数表的 `region` 和交易表 `region` 关联，不再根据 `transaction_time`、`start_date` 和 `end_date` 筛选行；增量归属入口仍同时要求 `transaction_time` 落在 `[start_date, end_date]`。`is_daily` 取值只能是 `0` 或 `1`，其中 `1` 表示增量归属，`0` 表示初始化聚类。`max_transaction_time_interval` 映射到共现窗口分钟数，`min_transaction_number` 映射到最小支持交易人数，`min_merchant_count` 映射到有效商圈最小商户数。同一任务分区内多行参数必须使用相同算法参数，否则任务会报错。交易时间衰减参数不再从参数表读取，初始化和增量任务统一使用 notebook 中的 `algorithm_config.cooccurrence.decay_tau_minutes`。
 
 Hive 入口写入目标表字段为：
 
@@ -126,8 +134,8 @@ Hive 入口写入目标表字段为：
 - `previous_community_id`
 - `region`
 - `is_interfere`
-- `is_abnormal`
 - `update_time`
+- `is_abnormal`
 - `is_position`
 - `dt`
 
@@ -142,7 +150,7 @@ Hive 目标表 `is_abnormal` 输出以下商户状态码：
 - `3`：疑似孤立，初始化聚类时商户没有有效边或所在社区未达到配置项 `anchors.minimum_community_size` 定义的有效商圈规模；增量归属时商户没有指向存量商圈成员的有效 SPPMI 边，或图投票分数未达到归入阈值。
 - `4`：疑似消逝，当前初始化聚类和增量归属入口不会产出该状态。
 - `5`：疑似跨区域，当前已暂停判断，初始化聚类和增量归属均不会产出该状态。
-- `6`：疑似连锁店，当前已暂停判断，初始化聚类和增量归属均不会产出该状态。
+- `6`：疑似连锁店；初始化聚类会对命中访问量规则且已挂靠有效商圈的非分类 `2` 商户输出该状态，增量归属当前不会产出该状态。
 - `7`：已删除，当前初始化聚类和增量归属入口不会产出该状态。
 
 内部算法仍使用 `normal`、`suspect_isolated`、`suspect_online` 等状态名，写入 Hive 目标表前统一转换为上述状态码。
@@ -166,5 +174,5 @@ python -m pytest
 - `[graph].degree_penalty_gamma`：按端点候选邻居度数惩罚 SPPMI 边权，当前建议 `0.0`，先退回原始 SPPMI，避免连锁店跨商圈边被过度压低。
 - `[graph].jaccard_threshold`：边两端候选邻居集合的 Jaccard 结构门槛，当前建议 `0.0`，先保留低重叠的跨商圈边用于识别多商圈普通成员。
 - `[anchors].maximum_participation`：锚点候选最大参与系数，当前建议 `0.1`，超过该阈值的非连锁商户不能成为锚点。
-- `[anchors].chain_visit_count_quantile`：访问量型疑似连锁规则的分位阈值，当前判断逻辑已暂停，配置暂不生效。
-- `[anchors].chain_minimum_visit_count`：访问量型疑似连锁规则的绝对访问次数下限，当前判断逻辑已暂停，配置暂不生效。
+- `[anchors].chain_visit_count_quantile`：访问量型疑似连锁规则的分位阈值；初始化聚类使用本次全部商户访问量计算分位值。
+- `[anchors].chain_minimum_visit_count`：访问量型疑似连锁规则的绝对访问次数下限；实际阈值取分位值与该值中的较大者。

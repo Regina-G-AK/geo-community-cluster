@@ -8,6 +8,9 @@ from business_district.errors import AlgorithmError
 from business_district.graph import PairStatistics
 
 
+PICKLE_PROTOCOL = 4
+
+
 def build_pair_statistics_path(
     output_directory: Path,
     region: str,
@@ -33,7 +36,7 @@ def write_pair_statistics(
 
     try:
         with temporary_path.open("wb") as file:
-            pickle.dump(statistics, file, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(statistics, file, protocol=PICKLE_PROTOCOL)
         os.replace(temporary_path, path)
     except (OSError, pickle.PickleError) as error:
         raise AlgorithmError(

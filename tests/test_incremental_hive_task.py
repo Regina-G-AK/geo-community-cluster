@@ -649,6 +649,10 @@ def test_insert_new_target_rows_uses_insert_into(
     assert "insert overwrite" not in joined_sql
     assert "left join target_table target" not in joined_sql
     assert fake_sd.tables[0].columns.tolist() == hive_task.TARGET_SELECT_COLUMNS
+    assert (
+        fake_sd.tables[0].columns.get_loc("update_time")
+        < fake_sd.tables[0].columns.get_loc("is_abnormal")
+    )
 
 
 def test_load_incremental_transactions_keeps_first_duplicate_flow_day(

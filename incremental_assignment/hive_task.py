@@ -38,7 +38,6 @@ from business_district.hive_task import (
     PARAMETER_TABLE,
     build_runtime_config,
     build_source_dt_list,
-    filter_source_data_by_parameters,
     load_hive_algorithm_parameters,
 )
 from business_district.intermediate import (
@@ -86,8 +85,8 @@ TARGET_COLUMNS = [
     "previous_community_id",
     "region",
     "is_interfere",
-    "is_abnormal",
     "update_time",
+    "is_abnormal",
     "is_position",
     "dt",
 ]
@@ -97,8 +96,8 @@ TARGET_SELECT_COLUMNS = [
     "previous_community_id",
     "region",
     "is_interfere",
-    "is_abnormal",
     "update_time",
+    "is_abnormal",
     "is_position",
 ]
 SOURCE_REQUIRED_COLUMNS = {
@@ -218,6 +217,45 @@ def _parse_transaction_time(
             f"table={table_name}, invalid_rows={int(invalid.sum())}, examples={examples}"
         )
     return parsed
+
+
+def _filter_source_data_by_parameters(
+    source_data: pd.DataFrame,
+    parameters: List[HiveAlgorithmParameter],
+    timestamp_formats: Tuple[str, ...],
+    source_table: str,
+    parameter_table: str,
+) -> pd.DataFrame:
+    missing_columns = sorted(
+        {REGION, RAW_TIMESTAMP}.difference(set(source_data.columns))
+    )
+    if missing_columns:
+        raise TransactionDataError(
+            "Hive 输入表缺少参数表关联字段: "
+            f"source_table={source_table}, parameter_table={parameter_table}, "
+            f"missing_columns={missing_columns}"
+        )
+    transaction_time = _parse_transaction_time(
+        source_data[RAW_TIMESTAMP],
+        timestamp_formats,
+        source_table,
+    )
+    matched = pd.Series(False, index=source_data.index)
+    source_region = source_data[REGION]
+    for parameter in parameters:
+        matched = matched | (
+            source_region.eq(parameter.region)
+            & transaction_time.ge(parameter.start_date)
+            & transaction_time.lt(parameter.end_exclusive)
+        )
+    result = source_data.loc[matched].copy()
+    if result.empty:
+        raise TransactionDataError(
+            "Hive 参数表没有匹配到输入交易: "
+            f"source_table={source_table}, parameter_table={parameter_table}, "
+            f"parameter_count={len(parameters)}, source_rows={len(source_data)}"
+        )
+    return result.reset_index(drop=True)
 
 
 def load_incremental_transactions(
@@ -911,7 +949,7 @@ class TaskMain:
                 f"source_dt={source_dt_list}"
             )
             source_data = sd.read_table(self.task_config.source_table, dt=source_dt_list)
-            filtered_source_data = filter_source_data_by_parameters(
+            filtered_source_data = _filter_source_data_by_parameters(
                 source_data,
                 parameters,
                 self.task_config.timestamp_formats,

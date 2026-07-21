@@ -250,13 +250,19 @@ def test_read_filtered_source_hive_table_filters_each_part_before_concat(
         "dev_icamp.input_table",
         ["20260131"],
         parameters,
-        ("%Y%m%dT%H%M%S",),
         "param_table",
     )
 
-    assert concat_storenames == [["first-match"], ["second-match"]]
-    assert result["storename"].tolist() == ["first-match", "second-match"]
-    assert result["dt"].tolist() == ["20260131", "20260131"]
+    assert concat_storenames == [
+        ["first-match"],
+        ["second-match", "out-of-range"],
+    ]
+    assert result["storename"].tolist() == [
+        "first-match",
+        "second-match",
+        "out-of-range",
+    ]
+    assert result["dt"].tolist() == ["20260131", "20260131", "20260131"]
 
 
 def test_hive_target_output_formats_status_as_dict_code(
@@ -308,7 +314,7 @@ def test_hive_target_output_formats_status_as_dict_code(
     assert output["is_interfere"].tolist() == ["N", "N", "N"]
     assert output["dt"].tolist() == ["20260102", "20260102", "20260102"]
     assert output.columns.tolist() == hive_task.TARGET_COLUMNS
-    assert output.columns.get_loc("is_abnormal") < output.columns.get_loc("update_time")
+    assert output.columns.get_loc("update_time") < output.columns.get_loc("is_abnormal")
 
 
 def test_overwrite_target_table_replaces_current_regions_only(
@@ -431,12 +437,10 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
         table_name: str,
         dt_values: list[str],
         parameters: list[object],
-        timestamp_formats: tuple[str, ...],
         parameter_table: str,
     ) -> pd.DataFrame:
         partition_reads.append((table_name, dt_values))
         assert len(parameters) == 1
-        assert timestamp_formats == ("%Y%m%dT%H%M%S",)
         assert parameter_table == "param_table"
         if table_name == "source_table":
             return source_data.copy()
@@ -555,7 +559,7 @@ def test_hive_parameters_preserve_notebook_decay_tau(
     assert config.anchors.minimum_community_size == 5
 
 
-def test_filter_source_data_by_parameters_uses_region_and_date(
+def test_filter_source_data_by_parameters_uses_region_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
@@ -603,12 +607,11 @@ def test_filter_source_data_by_parameters_uses_region_and_date(
     filtered = hive_task.filter_source_data_by_parameters(
         source_data,
         parameters,
-        ("%Y%m%dT%H%M%S",),
         "source_table",
         "param_table",
     )
 
-    assert filtered["storename"].tolist() == ["in-range"]
+    assert filtered["storename"].tolist() == ["in-range", "out-of-range"]
     assert hive_task.build_source_dt_list(parameters) == ["20260131"]
 
 

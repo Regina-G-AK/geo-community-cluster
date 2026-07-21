@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import pickle
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -127,8 +128,8 @@ def _app_config(
             merchants_per_anchor=2,
             minimum_community_size=2,
             maximum_participation=0.99,
-            chain_visit_count_quantile=0.0,
-            chain_minimum_visit_count=1,
+            chain_visit_count_quantile=1.0,
+            chain_minimum_visit_count=100,
         ),
         output=OutputConfig(directory=output_path),
         runtime=RuntimeConfig(process_count=2),
@@ -715,7 +716,7 @@ def test_normal_merchants_use_final_graph_community_shares() -> None:
     assert int(bridge_rows["is_multi_community_member"].max()) == 1
 
 
-def test_business_results_do_not_mark_suspect_chain_store() -> None:
+def test_business_results_mark_visit_count_chain_as_suspect_chain_store() -> None:
     merchants = pd.DataFrame(
         [
             {
@@ -782,7 +783,7 @@ def test_business_results_do_not_mark_suspect_chain_store() -> None:
     merchant_a = result.loc[result["storename"].eq("a")].iloc[0]
     merchant_b = result.loc[result["storename"].eq("b")].iloc[0]
     assert merchant_a["status"] == "normal"
-    assert merchant_b["status"] == "normal"
+    assert merchant_b["status"] == "suspect_chain_store"
     assert set(valid_rows["community_id"].astype(int)) == {0}
     assert invalid_row["status"] == "suspect_isolated"
     assert invalid_row["community_id"] == ""
@@ -876,6 +877,81 @@ def test_pipeline_uses_geographic_seed_and_pmi_to_join_unpositioned_merchant(
     assert communities["a"] == communities["b"] == communities["x"]
 
 
+def test_pipeline_marks_high_visit_merchant_as_suspect_chain_store(
+    tmp_path: Path,
+) -> None:
+    transaction_path = tmp_path / "data.txt"
+    rows: list[str] = []
+    for user_index in range(4):
+        rows.extend(
+            [
+                _transaction_row(
+                    f"linked-{user_index}",
+                    f"linked-{user_index}-chain",
+                    "chain",
+                    f"20260101T10{user_index:02d}00",
+                    "shanghai",
+                    "20260101",
+                ),
+                _transaction_row(
+                    f"linked-{user_index}",
+                    f"linked-{user_index}-a",
+                    "a",
+                    f"20260101T10{user_index + 10:02d}00",
+                    "shanghai",
+                    "20260101",
+                ),
+                _transaction_row(
+                    f"linked-{user_index}",
+                    f"linked-{user_index}-b",
+                    "b",
+                    f"20260101T10{user_index + 20:02d}00",
+                    "shanghai",
+                    "20260101",
+                ),
+            ]
+        )
+    for user_index in range(4):
+        rows.append(
+            _transaction_row(
+                f"chain-only-{user_index}",
+                f"chain-only-{user_index}",
+                "chain",
+                f"20260102T10{user_index:02d}00",
+                "shanghai",
+                "20260102",
+            )
+        )
+    _write_transaction_file(transaction_path, rows)
+
+    output_path = tmp_path / "output"
+    base_config = _app_config(transaction_path, output_path, 2)
+    config = replace(
+        base_config,
+        anchors=replace(
+            base_config.anchors,
+            chain_visit_count_quantile=1.0,
+            chain_minimum_visit_count=1,
+        ),
+    )
+    run_result = run_algorithm_one_from_transactions(
+        config,
+        load_transactions(config.input),
+        "test",
+        "test",
+    )
+
+    chain_row = run_result.business_results.loc[
+        run_result.business_results["storename"].eq("chain")
+    ].iloc[0]
+    assert chain_row["status"] == "suspect_chain_store"
+    assert chain_row["is_chain_like"] == 1
+    assert chain_row["chain_reason"] == "visit_count"
+    assert chain_row["chain_visit_count_threshold"] == 8
+    assert chain_row["community_id"] != ""
+    assert chain_row["is_position"] == 0
+
+
 def test_pipeline_writes_intermediate_output_only(tmp_path: Path) -> None:
     transaction_path = tmp_path / "data.txt"
     rows: list[str] = []
@@ -927,6 +1003,8 @@ def test_pipeline_writes_intermediate_output_only(tmp_path: Path) -> None:
     assert sorted(path.name for path in output_directory.iterdir()) == [
         "pair_statistics_test-city.pkl"
     ]
+    intermediate_path = output_directory / "pair_statistics_test-city.pkl"
+    assert intermediate_path.read_bytes()[:2] == b"\x80\x04"
     assert summary.merchant_count == 4
     assert summary.community_count == 1
 
@@ -965,7 +1043,7 @@ def test_pipeline_writes_intermediate_output_only(tmp_path: Path) -> None:
     assert merchant_a["is_chain_like"] == 0
     assert merchant_a["is_primary_community"] == 1
     assert merchant_a["community_share"] == 1.0
-    assert merchant_a["chain_visit_count_threshold"] == 0
+    assert merchant_a["chain_visit_count_threshold"] == 100
 
     with (output_directory / "pair_statistics_test-city.pkl").open("rb") as file:
         pair_statistics = pickle.load(file)

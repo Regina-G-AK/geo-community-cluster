@@ -57,7 +57,7 @@ def build_timestamp_formats() -> TimestampFormats:
 def build_visit_config() -> VisitConfig:
     return VisitConfig(
         merge_window_minutes=30,
-        maximum_daily_merchants_per_card=30,
+        maximum_daily_merchants_per_card=100,
     )
 
 

@@ -21,11 +21,11 @@ from business_district.config import (
 )
 from business_district.errors import TransactionDataError
 from business_district.pipeline import run_algorithm_one_from_transactions
-from business_district.probes import print_dataframe_probe, print_probe, print_series_probe
+from business_district.probes import print_dataframe_probe, print_probe
 # 线上任务暂不启用资源监测
 # from business_district.resource_usage import record_resource_phase
 from business_district.status_codes import format_status_code
-from business_district.transactions import RAW_TIMESTAMP, REGION, load_hive_transactions
+from business_district.transactions import REGION, load_hive_transactions
 
 SOURCE_TABLE = "dev_icamp.icamp_merchant_cluster_algo_input"
 PARAMETER_TABLE = "dev_icamp.icamp_merchant_cluster_algo_param"
@@ -38,8 +38,8 @@ TARGET_COLUMNS = [
     "previous_community_id",
     "region",
     "is_interfere",
-    "is_abnormal",
     "update_time",
+    "is_abnormal",
     "is_position",
     "dt",
 ]
@@ -49,8 +49,8 @@ TARGET_SELECT_COLUMNS = [
     "previous_community_id",
     "region",
     "is_interfere",
-    "is_abnormal",
     "update_time",
+    "is_abnormal",
     "is_position",
 ]
 PARAMETER_REQUIRED_COLUMNS = {
@@ -388,69 +388,30 @@ def build_source_dt_list(parameters: List[HiveAlgorithmParameter]) -> List[str]:
     return sorted(dates)
 
 
-def _parse_transaction_time(
-    values: pd.Series,
-    timestamp_formats: Tuple[str, ...],
-    table_name: str,
-) -> pd.Series:
-    parsed = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
-    for timestamp_format in timestamp_formats:
-        missing = parsed.isna()
-        if not missing.any():
-            break
-        parsed.loc[missing] = pd.to_datetime(
-            values.loc[missing],
-            format=timestamp_format,
-            errors="coerce",
-        )
-    invalid = parsed.isna()
-    if invalid.any():
-        examples = values.loc[invalid].head(5).astype(str).tolist()
-        raise TransactionDataError(
-            "Hive 输入表交易时间解析失败: "
-            f"table={table_name}, invalid_rows={int(invalid.sum())}, examples={examples}"
-        )
-    # print_series_probe("Hive参数过滤交易时间解析完成", parsed)
-    return parsed
-
-
 def _select_source_data_by_parameters(
     source_data: pd.DataFrame,
     parameters: List[HiveAlgorithmParameter],
-    timestamp_formats: Tuple[str, ...],
     source_table: str,
     parameter_table: str,
 ) -> pd.DataFrame:
     # source.columns = source.columns.astype("string").str.strip()
-    missing_columns = sorted(
-        {REGION, RAW_TIMESTAMP}.difference(set(source_data.columns))
-    )
+    missing_columns = sorted({REGION}.difference(set(source_data.columns)))
     if missing_columns:
         raise TransactionDataError(
             "Hive 输入表缺少参数表关联字段: "
             f"source_table={source_table}, parameter_table={parameter_table}, "
             f"missing_columns={missing_columns}"
         )
-    transaction_time = _parse_transaction_time(
-        source_data[RAW_TIMESTAMP],
-        timestamp_formats,
-        source_table,
-    )
     matched = pd.Series(False, index=source_data.index)
     source_region = source_data[REGION]
     for parameter in parameters:
-        matched = matched | (
-            source_region.eq(parameter.region)
-            & transaction_time.ge(parameter.start_date)
-            & transaction_time.lt(parameter.end_exclusive)
-        )
+        matched = matched | source_region.eq(parameter.region)
     return source_data.loc[matched].copy()
 
 
 def filter_source_data_by_parameters(
     source_data: pd.DataFrame,
     parameters: List[HiveAlgorithmParameter],
-    timestamp_formats: Tuple[str, ...],
     source_table: str,
     parameter_table: str,
 ) -> pd.DataFrame:
@@ -458,7 +419,6 @@ def filter_source_data_by_parameters(
     result = _select_source_data_by_parameters(
         source_data,
         parameters,
-        timestamp_formats,
         source_table,
         parameter_table,
     )
@@ -476,7 +436,6 @@ def read_filtered_source_hive_table(
     table_name: str,
     dt_values: List[str],
     parameters: List[HiveAlgorithmParameter],
-    timestamp_formats: Tuple[str, ...],
     parameter_table: str,
 ) -> pd.DataFrame:
     dataframes: List[pd.DataFrame] = []
@@ -489,7 +448,6 @@ def read_filtered_source_hive_table(
         filtered = _select_source_data_by_parameters(
             dataframe,
             parameters,
-            timestamp_formats,
             table_name,
             parameter_table,
         )
@@ -675,7 +633,6 @@ class TaskMain:
                 self.task_config.source_table,
                 source_dt_list,
                 parameters,
-                config.input.timestamp_formats,
                 self.task_config.parameter_table,
             )
             transactions = load_hive_transactions(

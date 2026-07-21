@@ -27,7 +27,9 @@ from business_district.results import (
     build_business_results,
     build_community_results,
     build_merchant_results,
+    calculate_chain_visit_count_threshold,
     filter_merchants_by_community_size,
+    identify_chain_like_merchants,
 )
 # 线上任务暂不启用资源监测
 # from business_district.resource_usage import record_resource_phase
@@ -97,17 +99,23 @@ def run_algorithm_one_from_transactions(
         geographic_preparation.seed_pairs,
     )
     # record_resource_phase("地理种子边合并")
-    # 暂停按访问量识别疑似连锁商户，保留原配置和实现供后续恢复
-    # chain_visit_count_threshold = calculate_chain_visit_count_threshold(...)
-    # chain_like_merchant_ids = identify_chain_like_merchants(...)
-    chain_visit_count_threshold = 0
+    chain_visit_count_threshold = calculate_chain_visit_count_threshold(
+        list(statistics.merchant_visit_counts.values()),
+        config.anchors,
+    )
     category_chain_merchant_ids = set(
         prepared_transactions.loc[
             prepared_transactions[MERCHANT_CATEGORY].eq(2),
             MERCHANT,
         ].astype(str)
     ) if MERCHANT_CATEGORY in prepared_transactions.columns else set()
-    chain_like_merchant_ids = set(category_chain_merchant_ids)
+    visit_count_chain_merchant_ids = identify_chain_like_merchants(
+        statistics.merchant_visit_counts,
+        chain_visit_count_threshold,
+    )
+    chain_like_merchant_ids = (
+        category_chain_merchant_ids | visit_count_chain_merchant_ids
+    )
     # record_resource_phase("连锁商户识别")
     clustering_graph = graph.copy()
     clustering_graph.remove_nodes_from(chain_like_merchant_ids)
