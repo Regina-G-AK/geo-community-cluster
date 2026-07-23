@@ -486,6 +486,7 @@ def _format_abnormal_status(value: object) -> str:
 def build_hive_target_output(
     business_results: pd.DataFrame,
     output_dt: str,
+    minimum_community_size: int,
 ) -> pd.DataFrame:
     output = business_results[
         [
@@ -501,6 +502,17 @@ def build_hive_target_output(
     ].copy()
     output["storename"] = output["storename"].astype(str)
     output["community_id"] = output["community_id"].map(_format_hive_id)
+    active = output.loc[output["community_id"].ne("")]
+    community_sizes = active.groupby("community_id")["storename"].nunique()
+    small_community_ids = set(
+        community_sizes.loc[
+            community_sizes < minimum_community_size
+        ].index
+    )
+    small_community_mask = output["community_id"].isin(small_community_ids)
+    output.loc[small_community_mask, "community_id"] = ""
+    output.loc[small_community_mask, "status"] = "suspect_isolated"
+    output.loc[small_community_mask, "is_position"] = 0
     output["previous_community_id"] = ""
     output["region"] = output["region"].astype(str)
     output["is_interfere"] = "N"
@@ -653,6 +665,7 @@ class TaskMain:
             target_output = build_hive_target_output(
                 result.business_results,
                 self.dt_var,
+                runtime_config.minimum_community_size,
             )
             overwrite_target_table(
                 sd,

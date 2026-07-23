@@ -222,32 +222,18 @@ def _parse_transaction_time(
 def _filter_source_data_by_parameters(
     source_data: pd.DataFrame,
     parameters: List[HiveAlgorithmParameter],
-    timestamp_formats: Tuple[str, ...],
     source_table: str,
     parameter_table: str,
 ) -> pd.DataFrame:
-    missing_columns = sorted(
-        {REGION, RAW_TIMESTAMP}.difference(set(source_data.columns))
-    )
+    missing_columns = sorted({REGION}.difference(set(source_data.columns)))
     if missing_columns:
         raise TransactionDataError(
             "Hive 输入表缺少参数表关联字段: "
             f"source_table={source_table}, parameter_table={parameter_table}, "
             f"missing_columns={missing_columns}"
         )
-    transaction_time = _parse_transaction_time(
-        source_data[RAW_TIMESTAMP],
-        timestamp_formats,
-        source_table,
-    )
-    matched = pd.Series(False, index=source_data.index)
-    source_region = source_data[REGION]
-    for parameter in parameters:
-        matched = matched | (
-            source_region.eq(parameter.region)
-            & transaction_time.ge(parameter.start_date)
-            & transaction_time.lt(parameter.end_exclusive)
-        )
+    parameter_regions = {parameter.region for parameter in parameters}
+    matched = source_data[REGION].isin(parameter_regions)
     result = source_data.loc[matched].copy()
     if result.empty:
         raise TransactionDataError(
@@ -623,11 +609,6 @@ def _geographic_status_override(
     members: Dict[str, CommunityMember],
     assignment_config: AssignmentConfig,
 ) -> Optional[str]:
-    # 暂停疑似跨区域阈值校验和状态判断，保留配置供后续恢复
-    # if assignment_config.city_maximum_distance_meters <= (
-    #     assignment_config.community_assignment_distance_meters
-    # ):
-    #     raise TransactionDataError(...)
     nearest_distance = _nearest_member_distance(
         candidate,
         merchant_coordinates,
@@ -635,8 +616,6 @@ def _geographic_status_override(
     )
     if nearest_distance is None:
         return None
-    # if nearest_distance > assignment_config.city_maximum_distance_meters:
-    #     return SUSPECT_CROSS_REGION_STATUS
     if nearest_distance > assignment_config.community_assignment_distance_meters:
         return SUSPECT_ISOLATED_STATUS
     return None
@@ -952,7 +931,6 @@ class TaskMain:
             filtered_source_data = _filter_source_data_by_parameters(
                 source_data,
                 parameters,
-                self.task_config.timestamp_formats,
                 self.task_config.source_table,
                 self.task_config.parameter_table,
             )

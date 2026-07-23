@@ -503,6 +503,61 @@ def test_source_community_state_skips_multi_community_members(
     assert state.skipped_multi_community_storenames == frozenset({"multi"})
 
 
+def test_filter_source_data_by_parameters_only_filters_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    parameter_data = pd.DataFrame(
+        [
+            {
+                "start_date": "20260101",
+                "end_date": "20260102",
+                "region": "shanghai",
+                "max_transaction_time_interval": "90",
+                "min_transaction_number": "1",
+                "min_merchant_count": "3",
+                "is_daily": "1",
+            }
+        ]
+    )
+    source_data = pd.DataFrame(
+        [
+            {
+                "storename": "inside-date-range",
+                "transaction_time": "20260101T100000",
+                "region": "shanghai",
+            },
+            {
+                "storename": "outside-date-range",
+                "transaction_time": "20260103T100000",
+                "region": "shanghai",
+            },
+            {
+                "storename": "other-region",
+                "transaction_time": "20260101T100000",
+                "region": "beijing",
+            },
+        ]
+    )
+    parameters = hive_task.load_hive_algorithm_parameters(
+        parameter_data,
+        "param_table",
+    )
+
+    filtered = hive_task._filter_source_data_by_parameters(
+        source_data,
+        parameters,
+        "source_table",
+        "param_table",
+    )
+
+    assert filtered["storename"].tolist() == [
+        "inside-date-range",
+        "outside-date-range",
+    ]
+
+
 def test_taskrun_reads_source_partitions_from_parameter_table(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -551,14 +606,14 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
             {
                 "account_number": "u2",
                 "global_flow_number": "f3",
-                "storename": "other-shop",
+                "storename": "old-shop",
                 "merchant_category": "1",
                 "transaction_time": "20260103T100000",
-                "pos_longitude": "121.2",
-                "pos_latitude": "31.2",
+                "pos_longitude": "121.0",
+                "pos_latitude": "31.0",
                 "region": "shanghai",
                 "is_interfere": "N",
-                "business_district": "",
+                "business_district": "D001",
             },
         ]
     )
@@ -601,7 +656,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
 
     assert ("param_table", ["20260101"]) in fake_sd.reads
     assert ("source_table", ["20260131"]) in fake_sd.reads
-    assert summary.source_rows == 2
+    assert summary.source_rows == 3
     assert summary.community_rows == 1
     assert summary.inserted_rows == 1
     assert fake_sd.tables[0].loc[0, "storename"] == "new-shop"
@@ -610,7 +665,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
     with (output_directory / "pair_statistics_shanghai.pkl").open("rb") as file:
         statistics = pickle.load(file)
     assert statistics.supports[("new-shop", "old-shop")] == 1
-    assert statistics.merchant_visit_counts == {"new-shop": 1, "old-shop": 1}
+    assert statistics.merchant_visit_counts == {"new-shop": 1, "old-shop": 2}
 
 
 def test_insert_new_target_rows_uses_insert_into(

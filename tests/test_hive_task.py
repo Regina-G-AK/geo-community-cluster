@@ -308,13 +308,74 @@ def test_hive_target_output_formats_status_as_dict_code(
         ]
     )
 
-    output = hive_task.build_hive_target_output(business_results, "20260102")
+    output = hive_task.build_hive_target_output(
+        business_results,
+        "20260102",
+        1,
+    )
 
     assert output["is_abnormal"].tolist() == ["1", "2", "6"]
     assert output["is_interfere"].tolist() == ["N", "N", "N"]
     assert output["dt"].tolist() == ["20260102", "20260102", "20260102"]
     assert output.columns.tolist() == hive_task.TARGET_COLUMNS
     assert output.columns.get_loc("update_time") < output.columns.get_loc("is_abnormal")
+
+
+def test_build_hive_target_output_clears_small_community_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("business_district.hive_task")
+    business_results = pd.DataFrame(
+        [
+            {
+                "storename": "small-shop",
+                "community_id": 1,
+                "previous_community_id": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "update_time": "2026-01-01 10:00:00",
+                "status": "normal",
+                "is_position": 1,
+                "dt": "20260101",
+            },
+            {
+                "storename": "large-shop-a",
+                "community_id": 2,
+                "previous_community_id": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "update_time": "2026-01-01 10:00:00",
+                "status": "normal",
+                "is_position": 1,
+                "dt": "20260101",
+            },
+            {
+                "storename": "large-shop-b",
+                "community_id": 2,
+                "previous_community_id": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "update_time": "2026-01-01 10:00:00",
+                "status": "normal",
+                "is_position": 0,
+                "dt": "20260101",
+            },
+        ]
+    )
+
+    output = hive_task.build_hive_target_output(
+        business_results,
+        "20260102",
+        2,
+    )
+
+    small_row = output.loc[output["storename"].eq("small-shop")].iloc[0]
+    large_rows = output.loc[output["community_id"].eq("2")]
+    assert small_row["community_id"] == ""
+    assert small_row["is_abnormal"] == "3"
+    assert small_row["is_position"] == 0
+    assert large_rows["storename"].tolist() == ["large-shop-a", "large-shop-b"]
 
 
 def test_overwrite_target_table_replaces_current_regions_only(

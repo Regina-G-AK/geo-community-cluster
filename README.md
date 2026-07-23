@@ -22,7 +22,7 @@ python scripts/analyze_pair_statistics.py
 
 线上 Jupyter 入口和独立 Python 入口当前均不启用资源监测，不会启动 `tracemalloc` 或读取 `/proc/self/status`；资源监测模块保留供本地排查使用。
 
-Hive 任务通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再根据参数表中的 `start_date`、`end_date` 自动计算涉及月份的最后一天，读取 `dev_icamp.icamp_merchant_cluster_algo_input` 对应月末分区。例如参数范围跨越 2026 年 1 月和 2 月时，读取 `dt=20260131`、`dt=20260228`。初始化任务对这些分区内的交易只按 `region` 过滤，不再判断 `transaction_time` 是否位于 `start_date` 和 `end_date` 之间；增量归属任务仍按实际起止时间和 `region` 过滤。交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供，其余静态算法参数由 notebook 提供。结果统一写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的 T-1 分区；初始化任务会保留该分区内其他 `region` 的已有结果，并用本次结果替换相同 `region` 的已有结果，不再写入风险商户表。
+Hive 任务通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再根据参数表中的 `start_date`、`end_date` 自动计算涉及月份的最后一天，读取 `dev_icamp.icamp_merchant_cluster_algo_input` 对应月末分区。例如参数范围跨越 2026 年 1 月和 2 月时，读取 `dt=20260131`、`dt=20260228`。初始化任务和增量归属任务对这些分区内的交易都只按 `region` 过滤，不再判断 `transaction_time` 是否位于 `start_date` 和 `end_date` 之间。交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供，其余静态算法参数由 notebook 提供。结果统一写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的 T-1 分区；初始化任务会保留该分区内其他 `region` 的已有结果，并用本次结果替换相同 `region` 的已有结果，不再写入风险商户表。
 
 Hive 初始化入口的交易输入表会按 `/appdata/project/fid_bg_icmp/tbl/{表名}/dt={日期}/part*` 分片读取 parquet 文件；每个分片会先按参数表的 `region` 筛选，只有命中行才参与最终合并，以降低合并时的峰值内存。`dt` 统一使用分区路径中的日期，即使分片内自带 `dt` 列也会覆盖。日期范围内缺少目录、没有 `part*` 文件或分片全部为空的分区会被跳过；如果全部日期均无有效数据，或所有分片均没有匹配 `region` 的交易，任务会明确报错。
 
@@ -125,7 +125,7 @@ Hive 参数表 `dev_icamp.icamp_merchant_cluster_algo_param` 必须包含：
 - `min_merchant_count`
 - `is_daily`
 
-初始化入口会用参数表的 `region` 和交易表 `region` 关联，不再根据 `transaction_time`、`start_date` 和 `end_date` 筛选行；增量归属入口仍同时要求 `transaction_time` 落在 `[start_date, end_date]`。`is_daily` 取值只能是 `0` 或 `1`，其中 `1` 表示增量归属，`0` 表示初始化聚类。`max_transaction_time_interval` 映射到共现窗口分钟数，`min_transaction_number` 映射到最小支持交易人数，`min_merchant_count` 映射到有效商圈最小商户数。同一任务分区内多行参数必须使用相同算法参数，否则任务会报错。交易时间衰减参数不再从参数表读取，初始化和增量任务统一使用 notebook 中的 `algorithm_config.cooccurrence.decay_tau_minutes`。
+初始化入口和增量归属入口都只用参数表的 `region` 和交易表 `region` 关联，不再根据 `transaction_time`、`start_date` 和 `end_date` 筛选行。`is_daily` 取值只能是 `0` 或 `1`，其中 `1` 表示增量归属，`0` 表示初始化聚类。`max_transaction_time_interval` 映射到共现窗口分钟数，`min_transaction_number` 映射到最小支持交易人数，`min_merchant_count` 映射到有效商圈最小商户数。同一任务分区内多行参数必须使用相同算法参数，否则任务会报错。交易时间衰减参数不再从参数表读取，初始化和增量任务统一使用 notebook 中的 `algorithm_config.cooccurrence.decay_tau_minutes`。
 
 Hive 入口写入目标表字段为：
 
@@ -139,7 +139,7 @@ Hive 入口写入目标表字段为：
 - `is_position`
 - `dt`
 
-其中 `community_id` 为商圈 ID，分类 `2` 的线下连锁店及访问量规则识别出的连锁/泛客群商户可保留多条普通成员挂靠记录且 `is_position` 恒为 `0`；`previous_community_id` 留空，`region` 与输入表保持一致，`is_interfere` 固定为 `N`，`is_abnormal` 使用商户状态码，`update_time` 为运行时间戳，`is_position` 表示是否为锚点商户，`dt` 固定使用任务运行时计算出的 T-1 分区。
+其中 `community_id` 为商圈 ID，分类 `2` 的线下连锁店及访问量规则识别出的连锁/泛客群商户可保留多条普通成员挂靠记录且 `is_position` 恒为 `0`；写入 Hive 前按最终输出的 `storename` 去重统计各商圈商户数，低于参数表 `min_merchant_count` 的商圈不输出商圈 ID，并按疑似孤立商户处理；`previous_community_id` 留空，`region` 与输入表保持一致，`is_interfere` 固定为 `N`，`is_abnormal` 使用商户状态码，`update_time` 为运行时间戳，`is_position` 表示是否为锚点商户，`dt` 固定使用任务运行时计算出的 T-1 分区。
 
 ## 商户状态
 
