@@ -95,7 +95,7 @@ python scripts/draw_community_graphs.py merchants.csv community_graphs
 - `status`：输入可为空，初始化聚类忽略该字段。
 - `dt`：日期，不参与算法，输出使用该商户最新交易时间对应的值。
 
-算法会先读取经纬度并构建地理种子：同一 `storename` 的有坐标交易如果相距超过 `[geo].cluster_radius_meters`，会在内部拆成多个门店实体；随后按地理距离把有坐标门店聚成种子社区，再用交易共现 PMI/交易次数边把无坐标或未进入地理簇的商户接入这些社区。人工干预、输入状态和 `dt` 不参与算法。
+算法会先读取经纬度并构建地理种子：每个 `storename` 只提取一组有效数值坐标，同一商户存在多组不同有效坐标时会明确报错并给出商户名和坐标样例；随后按地理距离把有坐标商户聚成种子社区，再用交易共现 PMI/交易次数边把无坐标或未进入地理簇的商户接入这些社区。人工干预、输入状态和 `dt` 不参与算法。
 
 ## 输出
 
@@ -121,7 +121,7 @@ Hive 入口输入表必须包含：
 - `is_abnormal`
 - `business_district`
 
-`merchant_category` 必须是 `0`（线上）、`1`（线下）、`2`（线下连锁店）或 `3`（线下个体户）；同一 `storename` 对应多个分类会直接报错。初始化和增量任务只保留分类 `1`、`2` 的交易进入访问合并、候选边构建和聚类。分类 `2` 不进入社区发现且永远不能成为锚点，但会按正权重候选社区展开为一个或多个普通商圈成员；增量任务同样允许分类 `2` 输出多个商圈归属。`pos_longitude`、`pos_latitude`、`is_interfere`、`is_abnormal` 和 `business_district` 在输入时允许为空。`dt` 是 Hive 分区和输出字段，不要求读取结果包含该列；缺失时入口会按分区或任务日期补齐。经纬度只空一列、格式非法或越界时按无坐标处理；有效经纬度会参与初始化地理种子聚类，输出字段保持不变，不额外暴露内部拆分门店 ID。
+`merchant_category` 必须是 `0`（线上）、`1`（线下）、`2`（线下连锁店）或 `3`（线下个体户）；同一 `storename` 对应多个分类会直接报错。初始化和增量任务只保留分类 `1`、`2` 的交易进入访问合并、候选边构建和聚类。分类 `2` 不进入社区发现且永远不能成为锚点，但会按正权重候选社区展开为一个或多个普通商圈成员；增量任务同样允许分类 `2` 输出多个商圈归属。`pos_longitude`、`pos_latitude`、`is_interfere`、`is_abnormal` 和 `business_district` 在输入时允许为空。`dt` 是 Hive 分区和输出字段，不要求读取结果包含该列；缺失时入口会按分区或任务日期补齐。经纬度只空一列、格式非法或越界时按无坐标处理；同一 `storename` 的有效数值经纬度必须一致，有效经纬度会参与初始化地理种子聚类。
 
 Hive 参数表 `dev_icamp.icamp_merchant_cluster_algo_param` 必须包含：
 
@@ -171,7 +171,7 @@ python -m pytest
 
 ## 地理种子参数
 
-- `[geo].cluster_radius_meters`：地理种子聚类半径，当前配置为 `1000.0` 米。同名商户的有坐标交易会先按该半径拆成内部门店实体，再参与全局地理种子聚类。
+- `[geo].cluster_radius_meters`：地理种子聚类半径，当前配置为 `1000.0` 米。每个商户只使用一组经过一致性校验的有效坐标参与地理种子聚类；地理邻居通过空间网格筛选后再计算精确球面距离。
 - `[community].minimum_online_neighbor_count`：疑似线上商户至少需要关联的有坐标商户数；初始化流程使用 `[geo].cluster_radius_meters` 判断这些关联商户是否距离较远。
 - 增量归属使用 `AssignmentConfig.minimum_online_neighbor_count` 和 `community_assignment_distance_meters` 执行同一判定；分类 `2` 商户不参与疑似线上识别。`city_maximum_distance_meters` 对应的疑似跨区域判断当前已暂停，配置暂不生效。
 

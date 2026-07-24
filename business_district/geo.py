@@ -64,105 +64,109 @@ def _coordinate_mask(dataframe: pd.DataFrame) -> pd.Series:
     return dataframe[LONGITUDE].notna() & dataframe[LATITUDE].notna()
 
 
-def _coordinate_components(
+def _spatial_cell(
+    point: CoordinatePoint,
+    radius_meters: float,
+) -> Tuple[int, int, int]:
+    longitude_radians = math.radians(point.longitude)
+    latitude_radians = math.radians(point.latitude)
+    latitude_cosine = math.cos(latitude_radians)
+    x = EARTH_RADIUS_METERS * latitude_cosine * math.cos(longitude_radians)
+    y = EARTH_RADIUS_METERS * latitude_cosine * math.sin(longitude_radians)
+    z = EARTH_RADIUS_METERS * math.sin(latitude_radians)
+    return (
+        math.floor(x / radius_meters),
+        math.floor(y / radius_meters),
+        math.floor(z / radius_meters),
+    )
+
+
+def _nearby_coordinate_pairs(
     points: Tuple[CoordinatePoint, ...],
     radius_meters: float,
-) -> Tuple[Tuple[str, ...], ...]:
-    graph = nx.Graph()
-    graph.add_nodes_from(point.item_id for point in points)
-    for left_index, left in enumerate(points[:-1]):
-        for right in points[left_index + 1 :]:
-            distance = haversine_distance_meters(
-                left.longitude,
-                left.latitude,
-                right.longitude,
-                right.latitude,
-            )
-            if distance <= radius_meters:
-                graph.add_edge(left.item_id, right.item_id)
-    components = tuple(
-        tuple(sorted(str(item_id) for item_id in component))
-        for component in nx.connected_components(graph)
-    )
-    return tuple(sorted(components, key=lambda component: (-len(component), component)))
+) -> Tuple[Tuple[str, str], ...]:
+    points_by_cell: Dict[Tuple[int, int, int], List[CoordinatePoint]] = {}
+    pairs: List[Tuple[str, str]] = []
+    for point in points:
+        cell = _spatial_cell(point, radius_meters)
+        for x_offset in (-1, 0, 1):
+            for y_offset in (-1, 0, 1):
+                for z_offset in (-1, 0, 1):
+                    neighbor_cell = (
+                        cell[0] + x_offset,
+                        cell[1] + y_offset,
+                        cell[2] + z_offset,
+                    )
+                    for neighbor in points_by_cell.get(neighbor_cell, []):
+                        distance = haversine_distance_meters(
+                            point.longitude,
+                            point.latitude,
+                            neighbor.longitude,
+                            neighbor.latitude,
+                        )
+                        if distance <= radius_meters:
+                            pairs.append(
+                                tuple(sorted((point.item_id, neighbor.item_id)))
+                            )
+        points_by_cell.setdefault(cell, []).append(point)
+    return tuple(sorted(pairs))
 
 
-def _entity_id(
-    source_merchant_id: str,
-    component_index: int,
-) -> str:
-    return f"{source_merchant_id}#geo{component_index + 1:03d}"
-
-
-def split_geographic_entities(
+def _validated_merchant_coordinate_rows(
     transactions: pd.DataFrame,
-    radius_meters: float,
 ) -> pd.DataFrame:
-    normalized = transactions.reset_index(drop=True)
-    if SOURCE_MERCHANT not in transactions.columns:
-        source = normalized.assign(**{SOURCE_MERCHANT: normalized[MERCHANT]})
-    else:
-        source = normalized.copy()
-    result = source.copy()
-    result[MERCHANT] = result[MERCHANT].astype(str)
-    result[SOURCE_MERCHANT] = result[SOURCE_MERCHANT].astype(str)
-    existing_merchants = set(result[MERCHANT].astype(str))
-    entity_ids_by_row: Dict[int, str] = {}
-
-    for source_merchant_id, group in source.groupby(SOURCE_MERCHANT, sort=True):
-        positioned = group.loc[_coordinate_mask(group)]
-        if positioned.empty:
-            continue
-        points = tuple(
-            CoordinatePoint(
-                item_id=str(row_index),
-                longitude=float(row[LONGITUDE]),
-                latitude=float(row[LATITUDE]),
+    positioned = transactions.loc[
+        _coordinate_mask(transactions),
+        [MERCHANT, LONGITUDE, LATITUDE],
+    ].copy()
+    if positioned.empty:
+        return positioned
+    positioned[MERCHANT] = positioned[MERCHANT].astype(str)
+    distinct = positioned.drop_duplicates(
+        subset=[MERCHANT, LONGITUDE, LATITUDE]
+    )
+    coordinate_counts = distinct.groupby(MERCHANT, sort=True).size()
+    conflicted_merchants = coordinate_counts.loc[coordinate_counts > 1].index.tolist()
+    if conflicted_merchants:
+        conflicts: List[str] = []
+        for merchant_id in conflicted_merchants[:10]:
+            coordinates = distinct.loc[
+                distinct[MERCHANT].eq(merchant_id),
+                [LONGITUDE, LATITUDE],
+            ]
+            coordinate_samples = [
+                (
+                    float(longitude),
+                    float(latitude),
+                )
+                for longitude, latitude in coordinates.head(5).itertuples(
+                    index=False,
+                    name=None,
+                )
+            ]
+            conflicts.append(
+                f"merchant_id={str(merchant_id)!r}, "
+                f"coordinates={coordinate_samples}"
             )
-            for row_index, row in positioned.iterrows()
+        raise TransactionDataError(
+            "同一商户存在不一致的有效经纬度: "
+            f"conflicted_merchant_count={len(conflicted_merchants)}, "
+            f"examples={conflicts}"
         )
-        components = _coordinate_components(points, radius_meters)
-        if len(components) <= 1:
-            continue
-        generated_ids = tuple(
-            _entity_id(str(source_merchant_id), component_index)
-            for component_index in range(len(components))
-        )
-        collisions = sorted(
-            entity_id
-            for entity_id in generated_ids
-            if entity_id in existing_merchants
-        )
-        if collisions:
-            raise TransactionDataError(
-                "Generated geographic merchant ids collide with source merchant ids: "
-                f"source_merchant_id={source_merchant_id!r}, collisions={collisions}"
-            )
-        for component_index, component in enumerate(components):
-            entity_id = generated_ids[component_index]
-            for row_index in component:
-                entity_ids_by_row[int(row_index)] = entity_id
-
-    if not entity_ids_by_row:
-        return result.reset_index(drop=True)
-
-    assigned = pd.Series(entity_ids_by_row, dtype="string")
-    result.loc[assigned.index, MERCHANT] = assigned
-    return result.sort_values([MERCHANT]).reset_index(drop=True)
+    return distinct.sort_values(MERCHANT).reset_index(drop=True)
 
 
 def _merchant_coordinate_points(transactions: pd.DataFrame) -> Tuple[CoordinatePoint, ...]:
-    positioned = transactions.loc[_coordinate_mask(transactions)]
-    if positioned.empty:
+    coordinate_rows = _validated_merchant_coordinate_rows(transactions)
+    if coordinate_rows.empty:
         return tuple()
-    grouped = positioned.groupby(MERCHANT, sort=True)[[LONGITUDE, LATITUDE]].median()
     points = tuple(
         CoordinatePoint(
-            item_id=str(merchant_id),
+            item_id=str(row[MERCHANT]),
             longitude=float(row[LONGITUDE]),
             latitude=float(row[LATITUDE]),
         )
-        for merchant_id, row in grouped.iterrows()
+        for _, row in coordinate_rows.iterrows()
     )
     return points
 
@@ -218,27 +222,6 @@ def is_suspect_online_merchant(
     return False
 
 
-def _component_seed_pairs(
-    points_by_id: Dict[str, CoordinatePoint],
-    component: Tuple[str, ...],
-    radius_meters: float,
-) -> Tuple[Tuple[str, str], ...]:
-    pairs: List[Tuple[str, str]] = []
-    for left_index, left_id in enumerate(component[:-1]):
-        left = points_by_id[left_id]
-        for right_id in component[left_index + 1 :]:
-            right = points_by_id[right_id]
-            distance = haversine_distance_meters(
-                left.longitude,
-                left.latitude,
-                right.longitude,
-                right.latitude,
-            )
-            if distance <= radius_meters:
-                pairs.append(tuple(sorted((left_id, right_id))))
-    return tuple(sorted(set(pairs)))
-
-
 def build_geographic_seed_pairs(
     transactions: pd.DataFrame,
     radius_meters: float,
@@ -246,18 +229,16 @@ def build_geographic_seed_pairs(
     points = _merchant_coordinate_points(transactions)
     if not points:
         return tuple(), 0, 0
-    components = _coordinate_components(points, radius_meters)
-    points_by_id = {point.item_id: point for point in points}
-    seed_pairs: List[Tuple[str, str]] = []
-    seed_cluster_count = 0
-    for component in components:
-        if len(component) < 2:
-            continue
-        seed_cluster_count += 1
-        seed_pairs.extend(
-            _component_seed_pairs(points_by_id, component, radius_meters)
-        )
-    return tuple(sorted(set(seed_pairs))), len(points), seed_cluster_count
+    seed_pairs = _nearby_coordinate_pairs(points, radius_meters)
+    seed_graph = nx.Graph()
+    seed_graph.add_nodes_from(point.item_id for point in points)
+    seed_graph.add_edges_from(seed_pairs)
+    seed_cluster_count = sum(
+        1
+        for component in nx.connected_components(seed_graph)
+        if len(component) >= 2
+    )
+    return seed_pairs, len(points), seed_cluster_count
 
 
 def add_geographic_seed_edges(
@@ -286,25 +267,30 @@ def prepare_geographic_transactions(
     transactions: pd.DataFrame,
     radius_meters: float,
 ) -> GeographicPreparation:
-    split_transactions = split_geographic_entities(transactions, radius_meters)
+    normalized = transactions.reset_index(drop=True).copy()
+    normalized[MERCHANT] = normalized[MERCHANT].astype(str)
+    if SOURCE_MERCHANT not in normalized.columns:
+        prepared_transactions = normalized.assign(
+            **{SOURCE_MERCHANT: normalized[MERCHANT]}
+        )
+    else:
+        prepared_transactions = normalized.copy()
+        prepared_transactions[SOURCE_MERCHANT] = prepared_transactions[
+            SOURCE_MERCHANT
+        ].astype(str)
     seed_pairs, positioned_merchant_count, seed_cluster_count = (
-        build_geographic_seed_pairs(split_transactions, radius_meters)
+        build_geographic_seed_pairs(prepared_transactions, radius_meters)
     )
-    positioned_transaction_count = int(_coordinate_mask(split_transactions).sum())
-    split_entity_count = int(
-        split_transactions.loc[
-            split_transactions[MERCHANT].astype(str)
-            != split_transactions[SOURCE_MERCHANT].astype(str),
-            MERCHANT,
-        ].nunique()
+    positioned_transaction_count = int(
+        _coordinate_mask(prepared_transactions).sum()
     )
     return GeographicPreparation(
-        transactions=split_transactions,
+        transactions=prepared_transactions,
         seed_pairs=seed_pairs,
         summary=GeographicSummary(
             positioned_transaction_count=positioned_transaction_count,
             positioned_merchant_count=positioned_merchant_count,
-            split_entity_count=split_entity_count,
+            split_entity_count=0,
             seed_cluster_count=seed_cluster_count,
             seed_edge_count=len(seed_pairs),
         ),

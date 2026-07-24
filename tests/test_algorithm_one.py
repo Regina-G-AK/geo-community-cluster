@@ -401,7 +401,7 @@ def test_load_hive_transactions_rejects_conflicting_merchant_categories() -> Non
         )
 
 
-def test_geographic_preparation_splits_same_name_far_stores() -> None:
+def test_geographic_preparation_uses_one_identical_coordinate_per_merchant() -> None:
     transactions = pd.DataFrame(
         [
             {
@@ -419,8 +419,8 @@ def test_geographic_preparation_splits_same_name_far_stores() -> None:
                 MERCHANT: "shop",
                 SOURCE_MERCHANT: "shop",
                 TIMESTAMP: pd.Timestamp("2026-01-01 10:05:00"),
-                LONGITUDE: 121.0010,
-                LATITUDE: 31.0010,
+                LONGITUDE: 121.0000,
+                LATITUDE: 31.0000,
                 REGION: "shanghai",
                 DT: "20260101",
             },
@@ -429,8 +429,8 @@ def test_geographic_preparation_splits_same_name_far_stores() -> None:
                 MERCHANT: "shop",
                 SOURCE_MERCHANT: "shop",
                 TIMESTAMP: pd.Timestamp("2026-01-01 10:10:00"),
-                LONGITUDE: 122.0000,
-                LATITUDE: 32.0000,
+                LONGITUDE: 121.0000,
+                LATITUDE: 31.0000,
                 REGION: "shanghai",
                 DT: "20260101",
             },
@@ -450,14 +450,43 @@ def test_geographic_preparation_splits_same_name_far_stores() -> None:
     prepared = prepare_geographic_transactions(transactions, 1000.0)
 
     merchant_ids = set(prepared.transactions[MERCHANT].astype(str))
-    assert "shop" in merchant_ids
-    split_ids = [
-        merchant_id
-        for merchant_id in merchant_ids
-        if "#geo" in merchant_id
-    ]
-    assert len(split_ids) == 2
-    assert prepared.summary.split_entity_count == 2
+    assert merchant_ids == {"shop"}
+    assert prepared.summary.positioned_transaction_count == 3
+    assert prepared.summary.positioned_merchant_count == 1
+    assert prepared.summary.split_entity_count == 0
+
+
+def test_geographic_preparation_rejects_conflicting_merchant_coordinates() -> None:
+    transactions = pd.DataFrame(
+        [
+            {
+                CARD: "u1",
+                MERCHANT: "shop",
+                SOURCE_MERCHANT: "shop",
+                TIMESTAMP: pd.Timestamp("2026-01-01 10:00:00"),
+                LONGITUDE: 121.0000,
+                LATITUDE: 31.0000,
+                REGION: "shanghai",
+                DT: "20260101",
+            },
+            {
+                CARD: "u2",
+                MERCHANT: "shop",
+                SOURCE_MERCHANT: "shop",
+                TIMESTAMP: pd.Timestamp("2026-01-01 10:05:00"),
+                LONGITUDE: 122.0000,
+                LATITUDE: 32.0000,
+                REGION: "shanghai",
+                DT: "20260101",
+            },
+        ]
+    )
+
+    with pytest.raises(
+        TransactionDataError,
+        match=r"shop.*121\.0.*31\.0.*122\.0.*32\.0",
+    ):
+        prepare_geographic_transactions(transactions, 1000.0)
 
 
 def test_cds_pmi_matches_base_pmi_when_alpha_is_one() -> None:
