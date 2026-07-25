@@ -8,6 +8,7 @@ import pandas as pd
 
 
 Result = TypeVar("Result")
+COMMUNITY_ID = "community_id"
 
 
 class TableExportEmailConfig(NamedTuple):
@@ -25,6 +26,7 @@ class TableExportEmailConfig(NamedTuple):
 
 class TableExportEmailSummary(NamedTuple):
     source_row_count: int
+    exported_row_count: int
     source_column_count: int
     recipient_count: int
     copy_recipient_count: int
@@ -234,6 +236,32 @@ def read_source_table(
     return result
 
 
+def filter_assigned_communities(
+    dataframe: pd.DataFrame,
+    config: TableExportEmailConfig,
+) -> pd.DataFrame:
+    if COMMUNITY_ID not in dataframe.columns:
+        raise TableExportError(
+            "读表结果缺少 community_id 字段: "
+            f"table={config.source_table!r}, "
+            f"dt_values={config.dt_values!r}, "
+            f"columns={dataframe.columns.tolist()!r}"
+        )
+
+    result = dataframe.loc[
+        dataframe[COMMUNITY_ID].notna()
+        & dataframe[COMMUNITY_ID].ne("")
+    ].copy()
+    if result.empty:
+        raise TableExportError(
+            "community_id 非空的数据为 0 行，不生成和发送空附件: "
+            f"table={config.source_table!r}, "
+            f"dt_values={config.dt_values!r}, "
+            f"source_row_count={len(dataframe)}"
+        )
+    return result
+
+
 def write_excel_file(
     dataframe: pd.DataFrame,
     output_path: Path,
@@ -316,19 +344,25 @@ class TaskMain:
             f"output_path={str(output_path)!r}"
         )
         try:
-            dataframe = read_source_table(self.platform, self.config)
-            write_excel_file(dataframe, output_path)
+            source_dataframe = read_source_table(self.platform, self.config)
+            exported_dataframe = filter_assigned_communities(
+                source_dataframe,
+                self.config,
+            )
+            write_excel_file(exported_dataframe, output_path)
             self.platform.log_data(
                 "table export email task file write success "
-                f"row_count={len(dataframe)}, "
-                f"column_count={len(dataframe.columns)}, "
+                f"source_row_count={len(source_dataframe)}, "
+                f"exported_row_count={len(exported_dataframe)}, "
+                f"column_count={len(exported_dataframe.columns)}, "
                 f"output_path={str(output_path)!r}"
             )
             send_output_email(self.platform, self.config, output_path)
             seconds = time.time() - started_at
             summary = TableExportEmailSummary(
-                source_row_count=len(dataframe),
-                source_column_count=len(dataframe.columns),
+                source_row_count=len(source_dataframe),
+                exported_row_count=len(exported_dataframe),
+                source_column_count=len(exported_dataframe.columns),
                 recipient_count=len(self.config.recipients),
                 copy_recipient_count=len(self.config.copy_recipients),
                 output_path=output_path,
@@ -336,7 +370,8 @@ class TaskMain:
             )
             self.platform.log_data(
                 "table export email task success "
-                f"row_count={summary.source_row_count}, "
+                f"source_row_count={summary.source_row_count}, "
+                f"exported_row_count={summary.exported_row_count}, "
                 f"column_count={summary.source_column_count}, "
                 f"recipient_count={summary.recipient_count}, "
                 f"copy_recipient_count={summary.copy_recipient_count}, "

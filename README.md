@@ -20,7 +20,7 @@ python scripts/analyze_pair_statistics.py
 
 输入路径、图参数、访问量型商户阈值和重点商户输出数量集中定义在 `scripts/analyze_pair_statistics.py` 顶部；默认基于脚本位置读取项目根目录下的 `algorithm_one_output/pair_statistics_shanghai.pkl`，不受任务启动工作目录影响。打印的 JSON 统计覆盖全部商户，每类重点商户默认展示前 `50` 名。分析时直接校验中间文件中的原始字典，只为重点商户生成明细，孤立商户使用计数参与分布统计，避免大规模数据下复制全部商户和商户对。
 
-可以使用独立附件邮件任务读取 Hive 结果表、写出 Excel 文件并发送附件。`scripts/send_attachment_email_task.py` 顶部的 `CONFIG` 当前从 `dev_icamp.icamp_merchant_cluster_algo_output` 读取 `dt=20260720`，写入 `/appdata/project/fid_bg_icmp/community_output.xlsx`。读表使用 `spdbccc_data.read_table("dev_icamp.icamp_merchant_cluster_algo_output", dt=["20260720"])` 的完整表名形式，不再单独传入 `db_name`；运行前应核对分区日期、文件名、收件人和抄送人。
+可以使用独立附件邮件任务读取 Hive 结果表、写出 Excel 文件并发送附件。`scripts/send_attachment_email_task.py` 顶部的 `CONFIG` 当前从 `dev_icamp.icamp_merchant_cluster_algo_output` 读取 `dt=20260720`，只保留 `community_id` 非空且不等于空字符串的行，并写入 `/appdata/project/fid_bg_icmp/community_output.xlsx`。读表使用 `spdbccc_data.read_table("dev_icamp.icamp_merchant_cluster_algo_output", dt=["20260720"])` 的完整表名形式，不再单独传入 `db_name`；运行前应核对分区日期、文件名、收件人和抄送人。
 
 ```powershell
 python scripts/send_attachment_email_task.py

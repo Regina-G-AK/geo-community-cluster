@@ -39,7 +39,11 @@ def test_table_export_email_task_writes_excel_and_runs_complete_lifecycle(
     read_request: Dict[str, object] = {}
     email_request: Dict[str, object] = {}
     source_data = pd.DataFrame(
-        [{"storename": "商户甲", "community_id": "1"}]
+        [
+            {"storename": "商户甲", "community_id": "1"},
+            {"storename": "商户乙", "community_id": ""},
+            {"storename": "商户丙", "community_id": None},
+        ]
     )
 
     def read_table(
@@ -67,7 +71,8 @@ def test_table_export_email_task_writes_excel_and_runs_complete_lifecycle(
     summary = run_task(TaskMain(platform, _build_config(tmp_path, 1)))
     output_path = tmp_path / "community_output.xlsx"
 
-    assert summary.source_row_count == 1
+    assert summary.source_row_count == 3
+    assert summary.exported_row_count == 1
     assert summary.source_column_count == 2
     assert summary.output_path == output_path
     assert read_request == {
@@ -112,7 +117,9 @@ def test_table_export_email_task_retries_and_finishes_after_send_failure(
 
     platform = TaskPlatform(
         mount_check=lambda: events.append("mount"),
-        read_table=lambda table_name, dt: pd.DataFrame([{"value": 1}]),
+        read_table=lambda table_name, dt: pd.DataFrame(
+            [{"value": 1, "community_id": "1"}]
+        ),
         send_email=send_email,
         log_data=lambda message: events.append(f"log:{message}"),
         format_exception=lambda: events.append("formatted"),
