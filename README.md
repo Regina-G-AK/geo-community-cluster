@@ -30,9 +30,15 @@ python scripts/send_attachment_email_task.py
 
 线上 Jupyter 入口和独立 Python 入口当前均不启用资源监测，不会启动 `tracemalloc` 或读取 `/proc/self/status`；资源监测模块保留供本地排查使用。
 
-Hive 任务通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再根据参数表中的 `start_date`、`end_date` 自动计算涉及月份的最后一天，读取 `dev_icamp.icamp_merchant_cluster_algo_input` 对应月末分区。例如参数范围跨越 2026 年 1 月和 2 月时，读取 `dt=20260131`、`dt=20260228`。初始化任务和增量归属任务对这些分区内的交易都只按 `region` 过滤，不再判断 `transaction_time` 是否位于 `start_date` 和 `end_date` 之间。交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供，其余静态算法参数由 notebook 提供。结果统一写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的 T-1 分区；初始化任务会保留该分区内其他 `region` 的已有结果，并用本次结果替换相同 `region` 的已有结果，不再写入风险商户表。
+Hive 任务通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再根据参数表中的 `start_date`、`end_date` 计算输入分区：起止日期相同时直接读取该日分区，例如 `start_date=end_date=20260115` 时读取 `dt=20260115`；起止日期不同时读取时间范围所涉及月份的月底分区，例如范围跨越 2026 年 1 月和 2 月时读取 `dt=20260131`、`dt=20260228`。初始化任务和增量归属任务对这些分区内的交易都只按 `region` 过滤，不再判断 `transaction_time` 是否位于 `start_date` 和 `end_date` 之间。交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供，其余静态算法参数由 notebook 提供。初始化结果通过一条 `INSERT OVERWRITE` SQL 直接覆盖写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的 T-1 整个分区，结果行使用 `SELECT ... UNION ALL ...` 写入，不创建临时表、不保留该分区的历史行，也不再写入风险商户表。
 
 Hive 初始化入口的交易输入表会按 `/appdata/project/fid_bg_icmp/tbl/{表名}/dt={日期}/part*` 分片读取 parquet 文件；每个分片会先按参数表的 `region` 筛选，只有命中行才参与最终合并，以降低合并时的峰值内存。`dt` 统一使用分区路径中的日期，即使分片内自带 `dt` 列也会覆盖。日期范围内缺少目录、没有 `part*` 文件或分片全部为空的分区会被跳过；如果全部日期均无有效数据，或所有分片均没有匹配 `region` 的交易，任务会明确报错。
+
+可以使用 `scripts/write_hive_output_smoke_task.py` 验证临时表覆盖写入链路。脚本按线上 task 生命周期运行，先将 5 条 `region=write_test` 的测试记录写入 `dev_icamp.icamp_merchant_cluster_algo_output_smoke_tmp`，再通过 `INSERT OVERWRITE` 将 `dev_icamp.icamp_merchant_cluster_algo_output` 的平台 T-1 整个分区替换为这 5 条记录，最后删除临时表。执行会删除目标分区原有的全部地区数据，运行前必须确认目标环境和实际分区日期。
+
+```bash
+python scripts/write_hive_output_smoke_task.py
+```
 
 可以使用独立脚本验证挂载目录和 Hive parquet 分片读取，不运行聚类和写表逻辑。脚本会在读表成功或失败后执行 `taskfinish.finish_task()` 完成平台任务收尾。`scripts/test_hive_partition_read.py` 默认自动读取最近一个已结束月份的最后一天分区，同时可在顶部 `CONFIG` 中修改表根目录、表名、分区日期和预览行数。
 
@@ -56,7 +62,7 @@ python run_hive_business_district.py
 
 Python 入口与 notebook 使用相同的静态算法参数、Hive 表和任务生命周期，也会按参数表 `is_daily` 自动选择增量归属或初始化聚类。
 
-notebook 通过 `HiveTaskConfig` 显式传入强类型算法配置、输入表、参数表、输出表、临时表和 `dt_expression`，先普通读取参数表 T-1 分区，再按 `is_daily` 调度入口：`1` 调用增量归属，`0` 调用初始化聚类。
+notebook 通过 `HiveTaskConfig` 显式传入强类型算法配置、输入表、参数表、输出表和 `dt_expression`，增量配置额外传入临时表；入口先普通读取参数表 T-1 分区，再按 `is_daily` 调度：`1` 调用增量归属，`0` 调用初始化聚类。
 
 增量归属用于把新商户追加归入已有商圈。任务先读取参数表和输入表；输入表需要包含 `business_district` 字段。增量任务根据 notebook 中 `algorithm_config.city.code` 和 `algorithm_config.output.directory` 定位初始化聚类写出的 `pair_statistics_{region}.pkl`，文件不存在时直接报错。到访合并、图构建、图与地理投票、距离阈值和归属阈值均在 notebook 配置单元中显式设置，不再使用代码内置默认参数。
 

@@ -30,7 +30,6 @@ from business_district.transactions import REGION, load_hive_transactions
 SOURCE_TABLE = "dev_icamp.icamp_merchant_cluster_algo_input"
 PARAMETER_TABLE = "dev_icamp.icamp_merchant_cluster_algo_param"
 TARGET_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output"
-TARGET_TEMP_TABLE = "dev_icamp.icamp_merchant_cluster_algo_output_tmp"
 HIVE_TABLE_ROOT = Path("/appdata/project/fid_bg_icmp/tbl")
 TARGET_COLUMNS = [
     "storename",
@@ -190,7 +189,6 @@ class HiveTaskConfig:
     source_table: str
     parameter_table: str
     target_table: str
-    target_temp_table: str
     dt_expression: str
 
 
@@ -376,8 +374,13 @@ def build_runtime_config(
 def build_source_dt_list(parameters: List[HiveAlgorithmParameter]) -> List[str]:
     dates: Set[str] = set()
     for parameter in parameters:
-        start_month = parameter.start_date.normalize().replace(day=1)
-        end_month = parameter.end_date.normalize().replace(day=1)
+        start_date = parameter.start_date.normalize()
+        end_date = parameter.end_date.normalize()
+        if start_date == end_date:
+            dates.add(start_date.strftime("%Y%m%d"))
+            continue
+        start_month = start_date.replace(day=1)
+        end_month = end_date.replace(day=1)
         for month_start in pd.date_range(
             start_month,
             end_month,
@@ -525,85 +528,33 @@ def build_hive_target_output(
     return output.reset_index(drop=True)
 
 
-# def overwrite_target_table(
-#     sd: ModuleType,
-#     result: pd.DataFrame,
-#     table_name: str,
-#     temp_table_name: str,
-#     output_dt: str,
-# ) -> None:
-#     if result.empty:
-#         return
-
-#     target_select_columns = ", ".join(
-#         f"target.{column}" for column in TARGET_SELECT_COLUMNS
-#     )
-#     source_select_columns = ", ".join(
-#         f"source.{column}" for column in TARGET_SELECT_COLUMNS
-#     )
-#     merged_select_columns = ", ".join(TARGET_SELECT_COLUMNS)
-#     merged_temp_table_name = f"{temp_table_name}_merged"
-#     write_df = result[TARGET_SELECT_COLUMNS].reset_index(drop=True)
-#     sd.execute_sql(f"drop table if exists {temp_table_name}")
-#     sd.execute_sql(f"drop table if exists {merged_temp_table_name}")
-#     try:
-#         sd.write_table(write_df, temp_table_name, debug=False, dt=None)
-#         sd.execute_sql(
-#             f"""
-#             create table {merged_temp_table_name} as
-#             select {target_select_columns}
-#             from {table_name} target
-#             left join (
-#                 select distinct region
-#                 from {temp_table_name}
-#             ) source_regions
-#             on target.region = source_regions.region
-#             where target.dt = {output_dt}
-#               and source_regions.region is null
-#             union all
-#             select {source_select_columns}
-#             from {temp_table_name} source
-#             """
-#         )
-#         sd.execute_sql(
-#             f"""
-#             insert overwrite table {table_name}
-#             partition (dt={output_dt})
-#             select {merged_select_columns}
-#             from {merged_temp_table_name}
-#             """
-#         )
-#     finally:
-#         sd.execute_sql(f"drop table if exists {merged_temp_table_name}")
-#         sd.execute_sql(f"drop table if exists {temp_table_name}")
-
-
-
 def overwrite_target_table(
     sd: ModuleType,
     result: pd.DataFrame,
     table_name: str,
-    temp_table_name: str,
     output_dt: str,
 ) -> None:
     if result.empty:
-        return
+        raise TransactionDataError("结果为空")
 
-    select_columns = ", ".join(TARGET_SELECT_COLUMNS)
+    output_dt_text = str(output_dt)
     write_df = result[TARGET_SELECT_COLUMNS].reset_index(drop=True)
-    sd.execute_sql(f"drop table if exists {temp_table_name}")
-    try:
-        sd.write_table(write_df, temp_table_name, debug=False, dt=None)
-        sd.execute_sql(
-            f"""
-            insert overwrite table {table_name}
-            partition (dt={output_dt})
-            select {select_columns}
-            from {temp_table_name}
-            """
-        )
-    finally:
-        sd.execute_sql(f"drop table if exists {temp_table_name}")
+    row_selects = []
+    for row in write_df.itertuples(index=False, name=None):
+        string_values = [
+            "'" + str(value).replace("'", "''") + "'"
+            for value in row[:-1]
+        ]
+        values = string_values + [str(int(row[-1]))]
+        row_selects.append("select " + ", ".join(values))
+    select_sql = "\nunion all\n".join(row_selects)
+    sd.execute_sql(
+        f"""
+        insert overwrite table {table_name}
+        partition (dt='{output_dt_text}')
+        {select_sql}
+        """
+    )
 
 
 class TaskMain:
@@ -671,7 +622,6 @@ class TaskMain:
                 sd,
                 target_output,
                 self.task_config.target_table,
-                self.task_config.target_temp_table,
                 self.dt_var,
             )
             logrecord.log_data(
@@ -694,15 +644,7 @@ class TaskMain:
         return summary
 
     def destroy(self) -> None:
-        try:
-            sd.execute_sql(
-                f"drop table if exists {self.task_config.target_temp_table}"
-            )
-        except Exception as error:
-            raise RuntimeError(
-                "Hive 临时表清理失败: "
-                f"table={self.task_config.target_temp_table}"
-            ) from error
+        return
 
 
 def run_hive_task(task_config: HiveTaskConfig) -> HiveTaskSummary:

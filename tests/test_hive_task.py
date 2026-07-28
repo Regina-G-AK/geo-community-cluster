@@ -378,30 +378,15 @@ def test_build_hive_target_output_clears_small_community_ids(
     assert large_rows["storename"].tolist() == ["large-shop-a", "large-shop-b"]
 
 
-def test_overwrite_target_table_replaces_current_regions_only(
+def test_overwrite_target_table_overwrites_partition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
     hive_task = importlib.import_module("business_district.hive_task")
     sql_statements: list[str] = []
-    written_tables: list[tuple[pd.DataFrame, str]] = []
-
-    def execute_sql(sql: str) -> None:
-        sql_statements.append(sql)
-
-    def write_table(
-        dataframe: pd.DataFrame,
-        table_name: str,
-        debug: bool,
-        dt: None,
-    ) -> None:
-        assert debug is False
-        assert dt is None
-        written_tables.append((dataframe.copy(), table_name))
 
     fake_sd = types.SimpleNamespace(
-        execute_sql=execute_sql,
-        write_table=write_table,
+        execute_sql=lambda sql: sql_statements.append(sql),
     )
     output = pd.DataFrame(
         [
@@ -414,7 +399,7 @@ def test_overwrite_target_table_replaces_current_regions_only(
                 "update_time": "2026-01-01 10:00:00",
                 "is_abnormal": "1",
                 "is_position": 0,
-                "dt": "20260101",
+                "dt": "20260102",
             }
         ]
     )
@@ -423,24 +408,17 @@ def test_overwrite_target_table_replaces_current_regions_only(
         fake_sd,
         output,
         "target_table",
-        "temp_table",
         "20260102",
     )
 
-    joined_sql = " ".join(" ".join(sql.split()) for sql in sql_statements).lower()
-    assert len(written_tables) == 1
-    assert written_tables[0][1] == "temp_table"
-    assert written_tables[0][0]["region"].tolist() == ["shanghai"]
-    assert "create table temp_table_merged as" in joined_sql
-    assert "from target_table target" in joined_sql
-    assert "select distinct region from temp_table" in joined_sql
-    assert "target.region = source_regions.region" in joined_sql
-    assert "source_regions.region is null" in joined_sql
-    assert "union all" in joined_sql
-    assert written_tables[0][0].columns.tolist() == hive_task.TARGET_SELECT_COLUMNS
-    assert "target.dt = 20260102" in joined_sql
-    assert "insert overwrite table target_table partition (dt=20260102)" in joined_sql
-    assert "from temp_table_merged" in joined_sql
+    joined_sql = " ".join(sql_statements[0].split()).lower()
+    assert len(sql_statements) == 1
+    assert joined_sql.startswith("insert overwrite table target_table")
+    assert "partition (dt='20260102')" in joined_sql
+    assert (
+        "select 'new-shop', '1', '', 'shanghai', 'n', "
+        "'2026-01-01 10:00:00', '1', 0"
+    ) in joined_sql
 
 
 def test_status_name_formats_as_dict_code() -> None:
@@ -534,7 +512,6 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
         sd: types.SimpleNamespace,
         result: pd.DataFrame,
         table_name: str,
-        temp_table_name: str,
         output_dt: str,
     ) -> None:
         writes.append((output_dt, result["dt"].tolist()))
@@ -571,13 +548,12 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
         source_table="source_table",
         parameter_table="param_table",
         target_table="target_table",
-        target_temp_table="temp_table",
         dt_expression="T-1",
     )
     summary = hive_task.TaskMain(task_config).taskrun()
 
     assert reads == [("param_table", ["20260101"])]
-    assert partition_reads == [("source_table", ["20260131"])]
+    assert partition_reads == [("source_table", ["20260101"])]
     assert writes == [("20260101", ["20260101"])]
     assert summary.input_rows == 1
 
@@ -705,6 +681,33 @@ def test_build_source_dt_list_uses_each_month_end(
         "20260228",
         "20260331",
     ]
+
+
+def test_build_source_dt_list_uses_exact_single_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("business_district.hive_task")
+    parameter_data = pd.DataFrame(
+        [
+            {
+                "start_date": "20260115",
+                "end_date": "20260115",
+                "region": "shanghai",
+                "max_transaction_time_interval": "120",
+                "min_transaction_number": "3",
+                "min_merchant_count": "3",
+                "is_daily": "0",
+            }
+        ]
+    )
+
+    parameters = hive_task.load_hive_algorithm_parameters(
+        parameter_data,
+        "param_table",
+    )
+
+    assert hive_task.build_source_dt_list(parameters) == ["20260115"]
 
 
 def test_hive_parameters_reject_non_numeric_is_daily(
