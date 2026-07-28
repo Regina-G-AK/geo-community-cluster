@@ -130,6 +130,7 @@ def build_initial_task_config(algorithm_config: AppConfig) -> InitialHiveTaskCon
         source_table="dev_icamp.icamp_merchant_cluster_algo_input",
         parameter_table="dev_icamp.icamp_merchant_cluster_algo_param",
         target_table="dev_icamp.icamp_merchant_cluster_algo_output",
+        target_temp_table="dev_icamp.icamp_merchant_cluster_algo_output_tmp",
         dt_expression="T-1",
     )
 

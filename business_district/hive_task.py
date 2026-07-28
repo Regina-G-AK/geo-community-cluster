@@ -189,6 +189,7 @@ class HiveTaskConfig:
     source_table: str
     parameter_table: str
     target_table: str
+    target_temp_table: str
     dt_expression: str
 
 
@@ -532,29 +533,29 @@ def overwrite_target_table(
     sd: ModuleType,
     result: pd.DataFrame,
     table_name: str,
+    temp_table_name: str,
     output_dt: str,
 ) -> None:
     if result.empty:
         raise TransactionDataError("结果为空")
 
-    output_dt_text = str(output_dt)
-    write_df = result[TARGET_SELECT_COLUMNS].reset_index(drop=True)
-    row_selects = []
-    for row in write_df.itertuples(index=False, name=None):
-        string_values = [
-            "'" + str(value).replace("'", "''") + "'"
-            for value in row[:-1]
-        ]
-        values = string_values + [str(int(row[-1]))]
-        row_selects.append("select " + ", ".join(values))
-    select_sql = "\nunion all\n".join(row_selects)
-    sd.execute_sql(
-        f"""
-        insert overwrite table {table_name}
-        partition (dt='{output_dt_text}')
-        {select_sql}
-        """
+    select_columns = ", ".join(
+        f"source.{column}" for column in TARGET_SELECT_COLUMNS
     )
+    write_df = result[TARGET_SELECT_COLUMNS].reset_index(drop=True)
+    sd.execute_sql(f"drop table if exists {temp_table_name}")
+    try:
+        sd.write_table(write_df, temp_table_name, debug=False, dt=None)
+        sd.execute_sql(
+            f"""
+            insert overwrite table {table_name}
+            partition (dt='{str(output_dt)}')
+            select {select_columns}
+            from {temp_table_name} source
+            """
+        )
+    finally:
+        sd.execute_sql(f"drop table if exists {temp_table_name}")
 
 
 class TaskMain:
@@ -622,6 +623,7 @@ class TaskMain:
                 sd,
                 target_output,
                 self.task_config.target_table,
+                self.task_config.target_temp_table,
                 self.dt_var,
             )
             logrecord.log_data(
@@ -644,7 +646,15 @@ class TaskMain:
         return summary
 
     def destroy(self) -> None:
-        return
+        try:
+            sd.execute_sql(
+                f"drop table if exists {self.task_config.target_temp_table}"
+            )
+        except Exception as error:
+            raise RuntimeError(
+                "Hive 临时表清理失败: "
+                f"table={self.task_config.target_temp_table}"
+            ) from error
 
 
 def run_hive_task(task_config: HiveTaskConfig) -> HiveTaskSummary:

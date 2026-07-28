@@ -384,9 +384,13 @@ def test_overwrite_target_table_overwrites_partition(
     _install_spdbccc_data_stub(monkeypatch)
     hive_task = importlib.import_module("business_district.hive_task")
     sql_statements: list[str] = []
+    table_writes: list[tuple[pd.DataFrame, str, bool, object]] = []
 
     fake_sd = types.SimpleNamespace(
         execute_sql=lambda sql: sql_statements.append(sql),
+        write_table=lambda dataframe, table_name, debug, dt: table_writes.append(
+            (dataframe.copy(), table_name, debug, dt)
+        ),
     )
     output = pd.DataFrame(
         [
@@ -408,17 +412,24 @@ def test_overwrite_target_table_overwrites_partition(
         fake_sd,
         output,
         "target_table",
+        "temp_table",
         "20260102",
     )
 
-    joined_sql = " ".join(sql_statements[0].split()).lower()
-    assert len(sql_statements) == 1
+    joined_sql = " ".join(sql_statements[1].split()).lower()
+    assert len(sql_statements) == 3
+    assert sql_statements[0] == "drop table if exists temp_table"
+    assert sql_statements[2] == "drop table if exists temp_table"
+    assert len(table_writes) == 1
+    written_frame, written_table, debug, dt = table_writes[0]
+    assert written_table == "temp_table"
+    assert debug is False
+    assert dt is None
+    assert written_frame.columns.tolist() == hive_task.TARGET_SELECT_COLUMNS
+    assert written_frame["storename"].tolist() == ["new-shop"]
     assert joined_sql.startswith("insert overwrite table target_table")
     assert "partition (dt='20260102')" in joined_sql
-    assert (
-        "select 'new-shop', '1', '', 'shanghai', 'n', "
-        "'2026-01-01 10:00:00', '1', 0"
-    ) in joined_sql
+    assert "from temp_table source" in joined_sql
 
 
 def test_status_name_formats_as_dict_code() -> None:
@@ -464,7 +475,7 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
     )
     reads: list[tuple[str, list[str]]] = []
     partition_reads: list[tuple[str, list[str]]] = []
-    writes: list[tuple[str, list[str]]] = []
+    writes: list[tuple[str, str, list[str]]] = []
 
     def read_table(table_name: str, dt: list[str]) -> pd.DataFrame:
         reads.append((table_name, dt))
@@ -512,9 +523,10 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
         sd: types.SimpleNamespace,
         result: pd.DataFrame,
         table_name: str,
+        temp_table_name: str,
         output_dt: str,
     ) -> None:
-        writes.append((output_dt, result["dt"].tolist()))
+        writes.append((temp_table_name, output_dt, result["dt"].tolist()))
 
     monkeypatch.setattr(hive_task, "sd", types.SimpleNamespace(read_table=read_table))
     monkeypatch.setattr(
@@ -548,13 +560,14 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
         source_table="source_table",
         parameter_table="param_table",
         target_table="target_table",
+        target_temp_table="temp_table",
         dt_expression="T-1",
     )
     summary = hive_task.TaskMain(task_config).taskrun()
 
     assert reads == [("param_table", ["20260101"])]
     assert partition_reads == [("source_table", ["20260101"])]
-    assert writes == [("20260101", ["20260101"])]
+    assert writes == [("temp_table", "20260101", ["20260101"])]
     assert summary.input_rows == 1
 
 
