@@ -21,6 +21,7 @@ from business_district.config import (
     RuntimeConfig,
     VisitConfig,
 )
+from incremental_assignment.models import AssignmentConfig
 
 
 def _app_config(tmp_path: Path) -> AppConfig:
@@ -38,6 +39,12 @@ def _app_config(tmp_path: Path) -> AppConfig:
         anchors=AnchorConfig(1, 2, 2, 1, 0.99, 1.0, 100),
         output=OutputConfig(tmp_path / "output"),
         runtime=RuntimeConfig(2),
+    )
+
+
+def _assignment_config() -> AssignmentConfig:
+    return AssignmentConfig(
+        community_assignment_distance_meters=3000.0,
     )
 
 
@@ -321,6 +328,204 @@ def test_hive_target_output_formats_status_as_dict_code(
     assert output.columns.get_loc("update_time") < output.columns.get_loc("is_abnormal")
 
 
+def test_load_hive_transactions_keeps_business_district_as_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    transactions = importlib.import_module("business_district.transactions")
+    source = pd.DataFrame(
+        [
+            {
+                "account_number": "u1",
+                "global_flow_number": "f1",
+                "storename": "old-shop",
+                "transaction_time": "20260101T100000",
+                "pos_longitude": "121.0",
+                "pos_latitude": "31.0",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "is_abnormal": "1",
+                "business_district": "BD001",
+                "merchant_category": "1",
+                "dt": "20260101",
+            }
+        ]
+    )
+
+    result = transactions.load_hive_transactions(
+        source,
+        ("%Y%m%dT%H%M%S",),
+        "20260101",
+        "source_table",
+    )
+
+    assert result.loc[0, "business_district"] == "BD001"
+    assert str(result["business_district"].dtype) == "string"
+    assert result.columns.tolist()[:11] == [
+        "card_id",
+        "global_flow_number",
+        "merchant_id",
+        "merchant_category",
+        "timestamp",
+        "pos_longitude",
+        "pos_latitude",
+        "region",
+        "is_interfere",
+        "is_abnormal",
+        "business_district",
+    ]
+
+
+def test_load_existing_community_ids_preserves_alphanumeric_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("business_district.hive_task")
+    transactions = pd.DataFrame(
+        [
+            {"merchant_id": "old-shop", "business_district": "BD001"},
+            {"merchant_id": "old-shop", "business_district": "BD001"},
+            {"merchant_id": "new-shop", "business_district": ""},
+        ]
+    )
+
+    result = hive_task.load_existing_community_ids(
+        transactions,
+        "source_table",
+    )
+
+    assert result == {"old-shop": "BD001"}
+
+
+def test_load_existing_community_ids_accepts_existing_id_without_format_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("business_district.hive_task")
+    transactions = pd.DataFrame(
+        [{"merchant_id": "old-shop", "business_district": " 商圈-A/001 "}]
+    )
+
+    result = hive_task.load_existing_community_ids(
+        transactions,
+        "source_table",
+    )
+
+    assert result == {"old-shop": "商圈-A/001"}
+
+
+def test_merge_initial_assignment_prioritizes_existing_communities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("business_district.hive_task")
+    clustered_output = pd.DataFrame(
+        [
+            {
+                "storename": "old-shop",
+                "community_id": "0",
+                "previous_community_id": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "update_time": "2026-01-01 10:00:00",
+                "is_abnormal": "1",
+                "is_position": 1,
+                "dt": "20260101",
+            },
+            {
+                "storename": "assigned-shop",
+                "community_id": "0",
+                "previous_community_id": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "update_time": "2026-01-01 10:00:00",
+                "is_abnormal": "1",
+                "is_position": 1,
+                "dt": "20260101",
+            },
+            {
+                "storename": "new-shop-a",
+                "community_id": "1",
+                "previous_community_id": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "update_time": "2026-01-01 10:00:00",
+                "is_abnormal": "1",
+                "is_position": 1,
+                "dt": "20260101",
+            },
+            {
+                "storename": "new-shop-b",
+                "community_id": "1",
+                "previous_community_id": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "update_time": "2026-01-01 10:00:00",
+                "is_abnormal": "1",
+                "is_position": 0,
+                "dt": "20260101",
+            },
+            {
+                "storename": "new-shop-c",
+                "community_id": "1",
+                "previous_community_id": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "update_time": "2026-01-01 10:00:00",
+                "is_abnormal": "1",
+                "is_position": 0,
+                "dt": "20260101",
+            },
+        ],
+        columns=hive_task.TARGET_COLUMNS,
+    )
+    assignment_output = pd.DataFrame(
+        [
+            {
+                "storename": "assigned-shop",
+                "community_id": "BD001",
+                "previous_community_id": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "update_time": "2026-01-01 10:01:00",
+                "is_abnormal": "1",
+                "is_position": 0,
+                "dt": "20260101",
+            },
+            {
+                "storename": "new-shop-a",
+                "community_id": "",
+                "previous_community_id": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "update_time": "2026-01-01 10:01:00",
+                "is_abnormal": "3",
+                "is_position": 0,
+                "dt": "20260101",
+            },
+        ],
+        columns=hive_task.TARGET_COLUMNS,
+    )
+
+    result = hive_task.merge_initial_assignment_output(
+        clustered_output,
+        assignment_output,
+        {"old-shop": "BD001"},
+        3,
+    )
+    community_ids = result.set_index("storename")["community_id"].to_dict()
+
+    assert community_ids == {
+        "new-shop-a": "1",
+        "new-shop-b": "1",
+        "new-shop-c": "1",
+        "old-shop": "BD001",
+        "assigned-shop": "BD001",
+    }
+    assert all(isinstance(value, str) for value in result["community_id"])
+    assert result.loc[result["storename"].eq("old-shop"), "is_position"].item() == 0
+
+
 def test_build_hive_target_output_clears_small_community_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -551,12 +756,24 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
     )
     monkeypatch.setattr(
         hive_task,
+        "build_initial_assignment_output",
+        lambda clustered_output,
+        transactions,
+        config,
+        assignment_config,
+        source_table,
+        output_dt,
+        minimum_community_size: clustered_output,
+    )
+    monkeypatch.setattr(
+        hive_task,
         "overwrite_target_table",
         overwrite_target_table,
     )
 
     task_config = hive_task.HiveTaskConfig(
         algorithm_config=_app_config(tmp_path),
+        assignment_config=_assignment_config(),
         source_table="source_table",
         parameter_table="param_table",
         target_table="target_table",

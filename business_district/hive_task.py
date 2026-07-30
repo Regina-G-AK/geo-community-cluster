@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Iterator, List, Set, Tuple
+from typing import Dict, Iterator, List, Set, Tuple
 
 import pandas as pd
 import spdbccc_data as sd
@@ -20,12 +20,23 @@ from business_district.config import (
     apply_runtime_parameters,
 )
 from business_district.errors import TransactionDataError
+from business_district.graph import build_sparse_graph
+from business_district.intermediate import (
+    build_pair_statistics_path,
+    read_pair_statistics,
+)
 from business_district.pipeline import run_algorithm_one_from_transactions
 from business_district.probes import print_dataframe_probe, print_probe
 # 线上任务暂不启用资源监测
 # from business_district.resource_usage import record_resource_phase
 from business_district.status_codes import format_status_code
-from business_district.transactions import REGION, load_hive_transactions
+from business_district.transactions import (
+    MERCHANT,
+    RAW_BUSINESS_DISTRICT,
+    REGION,
+    load_hive_transactions,
+)
+from incremental_assignment.models import AssignmentConfig
 
 SOURCE_TABLE = "dev_icamp.icamp_merchant_cluster_algo_input"
 PARAMETER_TABLE = "dev_icamp.icamp_merchant_cluster_algo_param"
@@ -186,6 +197,7 @@ def read_partitioned_hive_table(
 @dataclass(frozen=True)
 class HiveTaskConfig:
     algorithm_config: AppConfig
+    assignment_config: AssignmentConfig
     source_table: str
     parameter_table: str
     target_table: str
@@ -478,13 +490,200 @@ def read_filtered_source_hive_table(
 
 
 def _format_hive_id(value: object) -> str:
-    if pd.isna(value) or value == "":
+    text = _clean_text(value)
+    if not text:
         return ""
-    return str(int(value))
+    try:
+        numeric = float(text)
+    except ValueError:
+        return text
+    if numeric.is_integer():
+        return str(int(numeric))
+    return text
 
 
 def _format_abnormal_status(value: object) -> str:
     return format_status_code(value)
+
+
+def load_existing_community_ids(
+    transactions: pd.DataFrame,
+    source_table: str,
+) -> Dict[str, str]:
+    required_columns = {MERCHANT, RAW_BUSINESS_DISTRICT}
+    missing_columns = sorted(required_columns.difference(set(transactions.columns)))
+    if missing_columns:
+        raise TransactionDataError(
+            "Hive 初始化交易缺少已有商圈字段: "
+            f"table={source_table}, missing_columns={missing_columns}"
+        )
+
+    community_ids_by_storename: Dict[str, Set[str]] = {}
+    for row in transactions[[MERCHANT, RAW_BUSINESS_DISTRICT]].to_dict("records"):
+        storename = _clean_text(row[MERCHANT])
+        community_id = _clean_text(row[RAW_BUSINESS_DISTRICT])
+        if not community_id:
+            continue
+        community_ids_by_storename.setdefault(storename, set()).add(community_id)
+
+    conflicts = {
+        storename: sorted(community_ids)
+        for storename, community_ids in community_ids_by_storename.items()
+        if len(community_ids) > 1
+    }
+    if conflicts:
+        examples = list(sorted(conflicts.items()))[:10]
+        raise TransactionDataError(
+            "Hive 初始化输入的同一商户对应多个已有商圈 ID: "
+            f"table={source_table}, conflicted_merchants={len(conflicts)}, "
+            f"examples={examples}"
+        )
+    return {
+        storename: next(iter(community_ids))
+        for storename, community_ids in community_ids_by_storename.items()
+    }
+
+
+def merge_initial_assignment_output(
+    clustered_output: pd.DataFrame,
+    assignment_output: pd.DataFrame,
+    existing_community_ids: Dict[str, str],
+    minimum_community_size: int,
+) -> pd.DataFrame:
+    missing_columns = sorted(set(TARGET_COLUMNS).difference(clustered_output.columns))
+    if missing_columns:
+        raise TransactionDataError(
+            "初始化聚类结果缺少输出字段: "
+            f"missing_columns={missing_columns}"
+        )
+    existing_storenames = set(existing_community_ids)
+    existing_rows = (
+        clustered_output.loc[
+            clustered_output["storename"].isin(existing_storenames)
+        ]
+        .drop_duplicates(subset=["storename"], keep="first")
+        .copy()
+    )
+    missing_existing_storenames = sorted(
+        existing_storenames.difference(set(existing_rows["storename"]))
+    )
+    if missing_existing_storenames:
+        raise TransactionDataError(
+            "初始化聚类结果缺少需要保留原商圈 ID 的商户: "
+            f"missing_storenames={missing_existing_storenames[:10]}"
+        )
+    existing_rows["community_id"] = existing_rows["storename"].map(
+        existing_community_ids
+    )
+    existing_rows["previous_community_id"] = ""
+    existing_rows["is_abnormal"] = format_status_code("normal")
+    existing_rows["is_position"] = 0
+
+    assigned_rows = assignment_output.loc[
+        assignment_output["community_id"].ne("")
+    ].copy()
+    assigned_rows = assigned_rows.drop_duplicates(
+        subset=["storename", "community_id"],
+        keep="first",
+    )
+    assigned_storenames = set(assigned_rows["storename"])
+    residual_rows = clustered_output.loc[
+        ~clustered_output["storename"].isin(
+            existing_storenames.union(assigned_storenames)
+        )
+    ].copy()
+    combined = pd.concat(
+        [existing_rows, assigned_rows, residual_rows],
+        ignore_index=True,
+        copy=False,
+    )
+
+    existing_ids = set(existing_community_ids.values())
+    new_community_mask = (
+        combined["community_id"].ne("")
+        & ~combined["community_id"].isin(existing_ids)
+    )
+    new_community_sizes = (
+        combined.loc[new_community_mask]
+        .groupby("community_id")["storename"]
+        .nunique()
+    )
+    small_new_community_ids = set(
+        new_community_sizes.loc[
+            new_community_sizes < minimum_community_size
+        ].index
+    )
+    small_new_community_mask = combined["community_id"].isin(
+        small_new_community_ids
+    )
+    combined.loc[small_new_community_mask, "community_id"] = ""
+    combined.loc[small_new_community_mask, "is_abnormal"] = format_status_code(
+        "suspect_isolated"
+    )
+    combined.loc[small_new_community_mask, "is_position"] = 0
+    combined["community_id"] = combined["community_id"].map(_format_hive_id)
+    return (
+        combined[TARGET_COLUMNS]
+        .sort_values(["community_id", "storename"])
+        .reset_index(drop=True)
+    )
+
+
+def build_initial_assignment_output(
+    clustered_output: pd.DataFrame,
+    transactions: pd.DataFrame,
+    config: AppConfig,
+    assignment_config: AssignmentConfig,
+    source_table: str,
+    output_dt: str,
+    minimum_community_size: int,
+) -> pd.DataFrame:
+    existing_community_ids = load_existing_community_ids(
+        transactions,
+        source_table,
+    )
+    if not existing_community_ids:
+        return clustered_output
+
+    from incremental_assignment.hive_task import (
+        build_incremental_output,
+        build_latest_merchant_coordinates,
+        build_source_community_state,
+        load_source_candidates,
+    )
+
+    community_state = build_source_community_state(transactions, source_table)
+    statistics = read_pair_statistics(
+        build_pair_statistics_path(
+            config.output.directory,
+            config.city.code,
+        )
+    )
+    graph = build_sparse_graph(
+        statistics,
+        config.cooccurrence,
+        config.graph,
+    )
+    candidates = load_source_candidates(
+        transactions,
+        set(community_state.existing_storenames),
+        output_dt,
+    )
+    assignment_output = build_incremental_output(
+        candidates,
+        graph,
+        community_state.members,
+        build_latest_merchant_coordinates(transactions),
+        assignment_config,
+        datetime.datetime.now().astimezone(),
+        config.runtime.process_count,
+    )
+    return merge_initial_assignment_output(
+        clustered_output,
+        assignment_output,
+        existing_community_ids,
+        minimum_community_size,
+    )
 
 
 def build_hive_target_output(
@@ -616,6 +815,15 @@ class TaskMain:
             )
             target_output = build_hive_target_output(
                 result.business_results,
+                self.dt_var,
+                runtime_config.minimum_community_size,
+            )
+            target_output = build_initial_assignment_output(
+                target_output,
+                transactions,
+                config,
+                self.task_config.assignment_config,
+                self.task_config.source_table,
                 self.dt_var,
                 runtime_config.minimum_community_size,
             )

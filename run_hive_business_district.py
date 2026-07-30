@@ -113,20 +113,17 @@ def build_algorithm_config(
 
 def build_assignment_config() -> AssignmentConfig:
     return AssignmentConfig(
-        top_k_neighbors=15,
-        minimum_online_neighbor_count=30,
-        theta=0.55,
-        delta=0.10,
-        graph_weight=0.6,
-        geo_weight=0.3,
         community_assignment_distance_meters=3000.0,
-        city_maximum_distance_meters=50000.0,
     )
 
 
-def build_initial_task_config(algorithm_config: AppConfig) -> InitialHiveTaskConfig:
+def build_initial_task_config(
+    algorithm_config: AppConfig,
+    assignment_config: AssignmentConfig,
+) -> InitialHiveTaskConfig:
     return InitialHiveTaskConfig(
         algorithm_config=algorithm_config,
+        assignment_config=assignment_config,
         source_table="dev_icamp.icamp_merchant_cluster_algo_input",
         parameter_table="dev_icamp.icamp_merchant_cluster_algo_param",
         target_table="dev_icamp.icamp_merchant_cluster_algo_output",
@@ -203,7 +200,10 @@ def main() -> None:
         graph_config,
     )
     assignment_config = build_assignment_config()
-    initial_task_config = build_initial_task_config(algorithm_config)
+    initial_task_config = build_initial_task_config(
+        algorithm_config,
+        assignment_config,
+    )
     incremental_task_config = build_incremental_task_config(
         algorithm_config,
         timestamp_formats,

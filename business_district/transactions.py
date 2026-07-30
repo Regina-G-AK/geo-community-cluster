@@ -26,7 +26,21 @@ RAW_LONGITUDE = "pos_longitude"
 RAW_LATITUDE = "pos_latitude"
 RAW_INTERFERE = "is_interfere"
 RAW_ABNORMAL = "is_abnormal"
+RAW_BUSINESS_DISTRICT = "business_district"
 RAW_MERCHANT_CATEGORY = "merchant_category"
+HIVE_SOURCE_COLUMNS = (
+    RAW_CARD,
+    FLOW_NUMBER,
+    RAW_MERCHANT,
+    RAW_MERCHANT_CATEGORY,
+    RAW_TIMESTAMP,
+    RAW_LONGITUDE,
+    RAW_LATITUDE,
+    REGION,
+    RAW_INTERFERE,
+    RAW_ABNORMAL,
+    RAW_BUSINESS_DISTRICT,
+)
 REQUIRED_COLUMNS = {
     RAW_CARD,
     FLOW_NUMBER,
@@ -39,19 +53,7 @@ REQUIRED_COLUMNS = {
     "status",
     DT,
 }
-HIVE_REQUIRED_COLUMNS = {
-    RAW_CARD,
-    FLOW_NUMBER,
-    RAW_MERCHANT,
-    RAW_TIMESTAMP,
-    RAW_LONGITUDE,
-    RAW_LATITUDE,
-    REGION,
-    RAW_INTERFERE,
-    RAW_ABNORMAL,
-    RAW_MERCHANT_CATEGORY,
-    DT,
-}
+HIVE_REQUIRED_COLUMNS = set(HIVE_SOURCE_COLUMNS).union({DT})
 
 CLUSTERING_MERCHANT_CATEGORIES = frozenset({1, 2})
 
@@ -280,19 +282,7 @@ def load_hive_transactions(
     source = filter_clustering_merchant_categories(source, source_name)
     # print_dataframe_probe("Hive商户分类过滤完成", source)
 
-    selected = source[
-        [
-            RAW_CARD,
-            FLOW_NUMBER,
-            RAW_MERCHANT,
-            RAW_TIMESTAMP,
-            RAW_LONGITUDE,
-            RAW_LATITUDE,
-            REGION,
-            RAW_MERCHANT_CATEGORY,
-            DT,
-        ]
-    ].copy()
+    selected = source[list(HIVE_SOURCE_COLUMNS) + [DT]].copy()
     selected[RAW_CARD] = selected[RAW_CARD].astype("string").str.strip()
     selected[FLOW_NUMBER] = selected[FLOW_NUMBER].astype("string").str.strip()
     selected[RAW_MERCHANT] = selected[RAW_MERCHANT].astype("string").str.strip()
@@ -300,8 +290,13 @@ def load_hive_transactions(
     selected[RAW_LONGITUDE] = selected[RAW_LONGITUDE].astype("string").str.strip()
     selected[RAW_LATITUDE] = selected[RAW_LATITUDE].astype("string").str.strip()
     selected[REGION] = selected[REGION].astype("string").str.strip()
+    selected[RAW_INTERFERE] = selected[RAW_INTERFERE].astype("string").str.strip()
+    selected[RAW_ABNORMAL] = selected[RAW_ABNORMAL].astype("string").str.strip()
+    selected[RAW_BUSINESS_DISTRICT] = (
+        selected[RAW_BUSINESS_DISTRICT].astype("string").str.strip()
+    )
     selected[RAW_MERCHANT_CATEGORY] = selected[RAW_MERCHANT_CATEGORY].astype(int)
-    selected[DT] = selected[DT].str.strip()
+    selected[DT] = selected[DT].astype("string").str.strip()
 
     invalid_identifier = (
         selected[RAW_CARD].isna()

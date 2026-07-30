@@ -215,6 +215,7 @@ def test_load_hive_transactions_fills_partition_dt() -> None:
                 "region": "shanghai",
                 "is_interfere": "",
                 "is_abnormal": "",
+                "business_district": "",
             }
         ]
     )
@@ -243,6 +244,7 @@ def test_load_hive_transactions_keeps_first_duplicate_flow_day() -> None:
                 "region": "shanghai",
                 "is_interfere": "",
                 "is_abnormal": "",
+                "business_district": "",
                 "dt": "20260102",
             },
             {
@@ -256,6 +258,7 @@ def test_load_hive_transactions_keeps_first_duplicate_flow_day() -> None:
                 "region": "shanghai",
                 "is_interfere": "",
                 "is_abnormal": "",
+                "business_district": "",
                 "dt": "20260101",
             },
             {
@@ -269,6 +272,7 @@ def test_load_hive_transactions_keeps_first_duplicate_flow_day() -> None:
                 "region": "shanghai",
                 "is_interfere": "",
                 "is_abnormal": "",
+                "business_district": "",
                 "dt": "20260102",
             },
         ]
@@ -299,6 +303,7 @@ def test_load_hive_transactions_treats_invalid_coordinates_as_missing() -> None:
                 "region": "shanghai",
                 "is_interfere": "",
                 "is_abnormal": "",
+                "business_district": "",
                 "dt": "20260101",
             },
             {
@@ -312,6 +317,7 @@ def test_load_hive_transactions_treats_invalid_coordinates_as_missing() -> None:
                 "region": "shanghai",
                 "is_interfere": "",
                 "is_abnormal": "",
+                "business_district": "",
                 "dt": "20260101",
             },
             {
@@ -325,6 +331,7 @@ def test_load_hive_transactions_treats_invalid_coordinates_as_missing() -> None:
                 "region": "shanghai",
                 "is_interfere": "",
                 "is_abnormal": "",
+                "business_district": "",
                 "dt": "20260101",
             },
         ]
@@ -355,6 +362,7 @@ def test_load_hive_transactions_keeps_only_offline_categories() -> None:
                 "region": "shanghai",
                 "is_interfere": "N",
                 "is_abnormal": "",
+                "business_district": "",
                 "dt": "20260101",
             }
             for category in range(4)
@@ -386,6 +394,7 @@ def test_load_hive_transactions_rejects_conflicting_merchant_categories() -> Non
                 "region": "shanghai",
                 "is_interfere": "N",
                 "is_abnormal": "",
+                "business_district": "",
                 "dt": "20260101",
             }
             for category in (1, 2)

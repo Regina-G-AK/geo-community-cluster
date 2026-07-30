@@ -111,21 +111,13 @@ def _install_spdbccc_data_stub(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _config(
     community_assignment_distance_meters: float,
-    city_maximum_distance_meters: float,
 ) -> AssignmentConfig:
     return AssignmentConfig(
-        top_k_neighbors=15,
-        minimum_online_neighbor_count=2,
-        theta=0.55,
-        delta=0.10,
-        graph_weight=0.6,
-        geo_weight=0.3,
         community_assignment_distance_meters=community_assignment_distance_meters,
-        city_maximum_distance_meters=city_maximum_distance_meters,
     )
 
 
-def test_incremental_output_uses_graph_vote_and_marks_unassigned(
+def test_incremental_output_uses_strongest_pmi_edge_and_marks_unassigned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
@@ -141,10 +133,16 @@ def test_incremental_output_uses_graph_vote_and_marks_unassigned(
             community_id="2",
             is_anchor=False,
         ),
+        "member-c": hive_task.CommunityMember(
+            storename="member-c",
+            community_id="1",
+            is_anchor=False,
+        ),
     }
     graph = nx.Graph()
-    graph.add_edge("new-shop", "member-a", weight=1.0)
-    graph.add_edge("new-shop", "member-b", weight=3.0)
+    graph.add_edge("new-shop", "member-a", weight=4.0)
+    graph.add_edge("new-shop", "member-b", weight=5.0)
+    graph.add_edge("new-shop", "member-c", weight=4.0)
     candidates = [
         hive_task.HiveCandidateMerchant(
                 storename="new-shop",
@@ -165,7 +163,7 @@ def test_incremental_output_uses_graph_vote_and_marks_unassigned(
         graph,
         members,
         {},
-        _config(3000.0, 50000.0),
+        _config(3000.0),
         datetime.fromisoformat("2026-01-01T10:00:00"),
         1,
     )
@@ -176,7 +174,7 @@ def test_incremental_output_uses_graph_vote_and_marks_unassigned(
     assert output.loc[1, "is_abnormal"] == "3"
 
 
-def test_category_two_candidate_can_join_multiple_communities(
+def test_category_two_candidate_uses_single_strongest_pmi_edge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
@@ -204,17 +202,17 @@ def test_category_two_candidate_can_join_multiple_communities(
             "member-a": hive_task.CoordinatePoint("member-a", 121.0, 31.0),
             "member-b": hive_task.CoordinatePoint("member-b", 121.05, 31.0),
         },
-        _config(3000.0, 50000.0),
+        _config(3000.0),
         datetime.fromisoformat("2026-01-01T10:00:00"),
         1,
     )
 
-    assert output["community_id"].tolist() == ["1", "2"]
-    assert output["is_position"].tolist() == [0, 0]
-    assert output["is_abnormal"].tolist() == ["1", "1"]
+    assert output["community_id"].tolist() == ["2"]
+    assert output["is_position"].tolist() == [0]
+    assert output["is_abnormal"].tolist() == ["1"]
 
 
-def test_coordinate_missing_candidate_linked_to_distant_merchants_is_online(
+def test_coordinate_missing_candidate_ignores_neighbor_distance_and_uses_pmi(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
@@ -242,16 +240,16 @@ def test_coordinate_missing_candidate_linked_to_distant_merchants_is_online(
             "member-a": hive_task.CoordinatePoint("member-a", 121.0, 31.0),
             "member-b": hive_task.CoordinatePoint("member-b", 121.05, 31.0),
         },
-        _config(3000.0, 50000.0),
+        _config(3000.0),
         datetime.fromisoformat("2026-01-01T10:00:00"),
         1,
     )
 
-    assert output.loc[0, "community_id"] == ""
-    assert output.loc[0, "is_abnormal"] == "2"
+    assert output.loc[0, "community_id"] == "2"
+    assert output.loc[0, "is_abnormal"] == "1"
 
 
-def test_incremental_output_uses_geographic_vote_without_graph_edges(
+def test_incremental_output_uses_nearest_geographic_member_before_pmi(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
@@ -264,6 +262,11 @@ def test_incremental_output_uses_geographic_vote_without_graph_edges(
         ),
         "far-member": hive_task.CommunityMember(
             storename="far-member",
+            community_id="9",
+            is_anchor=False,
+        ),
+        "far-member-2": hive_task.CommunityMember(
+            storename="far-member-2",
             community_id="9",
             is_anchor=False,
         ),
@@ -281,10 +284,18 @@ def test_incremental_output_uses_geographic_vote_without_graph_edges(
         ),
         "far-member": hive_task.CoordinatePoint(
             item_id="far-member",
-            longitude=122.0,
-            latitude=32.0,
+            longitude=121.0003,
+            latitude=31.0003,
+        ),
+        "far-member-2": hive_task.CoordinatePoint(
+            item_id="far-member-2",
+            longitude=121.0004,
+            latitude=31.0004,
         ),
     }
+
+    graph = nx.Graph()
+    graph.add_edge("new-shop", "far-member", weight=100.0)
 
     output = hive_task.build_incremental_output(
         [
@@ -295,10 +306,10 @@ def test_incremental_output_uses_geographic_vote_without_graph_edges(
                     merchant_category=1,
             )
         ],
-        nx.Graph(),
+        graph,
         members,
         merchant_coordinates,
-        _config(3000.0, 50000.0),
+        _config(3000.0),
         datetime.fromisoformat("2026-01-01T10:00:00"),
         1,
     )
@@ -345,7 +356,7 @@ def test_coordinate_candidate_far_from_city_is_marked_isolated(
                 latitude=31.0,
             ),
         },
-        _config(3000.0, 50000.0),
+        _config(3000.0),
         datetime.fromisoformat("2026-01-01T10:00:00"),
         1,
     )
@@ -392,7 +403,7 @@ def test_coordinate_candidate_outside_community_distance_skips_graph_vote(
                 latitude=31.0,
             ),
         },
-        _config(3000.0, 50000.0),
+        _config(3000.0),
         datetime.fromisoformat("2026-01-01T10:00:00"),
         1,
     )
@@ -413,7 +424,7 @@ def test_hive_task_config_uses_explicit_algorithm_config(
         timestamp_formats=("%Y%m%dT%H%M%S",),
         visit_config=VisitConfig(30, 30),
         graph_config=GraphConfig("transaction_count", 0.75, 1.0, 10, 0.0),
-        assignment_config=_config(3000.0, 50000.0),
+        assignment_config=_config(3000.0),
         source_table="source_table",
         parameter_table="parameter_table",
         target_table="target_table",
@@ -589,6 +600,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "pos_latitude": "31.0",
                 "region": "shanghai",
                 "is_interfere": "N",
+                "is_abnormal": "1",
                 "business_district": "D001",
             },
             {
@@ -601,6 +613,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "pos_latitude": "31.0001",
                 "region": "shanghai",
                 "is_interfere": "N",
+                "is_abnormal": "",
                 "business_district": "",
             },
             {
@@ -613,6 +626,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "pos_latitude": "31.0",
                 "region": "shanghai",
                 "is_interfere": "N",
+                "is_abnormal": "1",
                 "business_district": "D001",
             },
         ]
@@ -644,7 +658,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
             top_k_neighbors=10,
             minimum_z_score=0.0,
         ),
-        assignment_config=_config(3000.0, 50000.0),
+        assignment_config=_config(3000.0),
         source_table="source_table",
         parameter_table="param_table",
         target_table="target_table",
@@ -727,6 +741,7 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
                 "pos_latitude": "31.0",
                 "region": "shanghai",
                 "is_interfere": "N",
+                "is_abnormal": "",
                 "dt": "20260102",
                 "business_district": "",
             },
@@ -740,6 +755,7 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
                 "pos_latitude": "31.0",
                 "region": "shanghai",
                 "is_interfere": "N",
+                "is_abnormal": "",
                 "dt": "20260101",
                 "business_district": "",
             },
@@ -753,6 +769,7 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
                 "pos_latitude": "31.1",
                 "region": "shanghai",
                 "is_interfere": "N",
+                "is_abnormal": "",
                 "dt": "20260102",
                 "business_district": "",
             },
@@ -768,6 +785,20 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
 
     assert transactions[hive_task.MERCHANT].tolist() == ["early", "normal"]
     assert transactions[hive_task.DT].tolist() == ["20260101", "20260102"]
+    assert transactions.columns.tolist() == [
+        "card_id",
+        "global_flow_number",
+        "merchant_id",
+        "merchant_category",
+        "timestamp",
+        "longitude",
+        "latitude",
+        "region",
+        "is_interfere",
+        "is_abnormal",
+        "business_district",
+        "dt",
+    ]
 
 
 def test_load_incremental_transactions_fills_missing_hive_partition_dt(
@@ -787,6 +818,7 @@ def test_load_incremental_transactions_fills_missing_hive_partition_dt(
                 "pos_latitude": "31.0",
                 "region": "shanghai",
                 "is_interfere": "N",
+                "is_abnormal": "1",
                 "business_district": "D001",
             }
         ]
@@ -819,6 +851,7 @@ def test_load_incremental_transactions_skips_interfered_merchants(
                 "pos_latitude": "31.0",
                 "region": "shanghai",
                 "is_interfere": "Y",
+                "is_abnormal": "",
                 "dt": "20260101",
                 "business_district": "",
             },
@@ -832,6 +865,7 @@ def test_load_incremental_transactions_skips_interfered_merchants(
                 "pos_latitude": "31.1",
                 "region": "shanghai",
                 "is_interfere": "N",
+                "is_abnormal": "",
                 "dt": "20260101",
                 "business_district": "",
             },
