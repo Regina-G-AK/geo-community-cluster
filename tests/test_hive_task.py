@@ -671,16 +671,27 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
     )
     source_data = pd.DataFrame(
         [
+                {
+                    "storename": "shop-a",
+                    "merchant_category": "1",
+                    "transaction_time": "20260101T100000",
+                    "region": "shanghai",
+                }
+        ]
+    )
+    cross_region_source_data = pd.DataFrame(
+        [
             {
-                "storename": "shop-a",
-                "transaction_time": "20260101T100000",
+                "storename": "北京市朝阳区商户",
+                "merchant_category": "1",
+                "transaction_time": "20260101T110000",
                 "region": "shanghai",
             }
         ]
     )
     reads: list[tuple[str, list[str]]] = []
     partition_reads: list[tuple[str, list[str]]] = []
-    writes: list[tuple[str, str, list[str]]] = []
+    writes: list[tuple[str, str, dict[str, str]]] = []
 
     def read_table(table_name: str, dt: list[str]) -> pd.DataFrame:
         reads.append((table_name, dt))
@@ -688,17 +699,20 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
             return parameter_data.copy()
         raise AssertionError(f"unexpected table={table_name}")
 
-    def read_filtered_source_hive_table(
+    def read_source_hive_table_by_parameters(
         table_name: str,
         dt_values: list[str],
         parameters: list[object],
         parameter_table: str,
-    ) -> pd.DataFrame:
+    ) -> object:
         partition_reads.append((table_name, dt_values))
         assert len(parameters) == 1
         assert parameter_table == "param_table"
         if table_name == "source_table":
-            return source_data.copy()
+            return hive_task.SourceDataSelection(
+                included=source_data.copy(),
+                cross_region=cross_region_source_data.copy(),
+            )
         raise AssertionError(f"parameter table must use sd.read_table: {table_name}")
 
     config = types.SimpleNamespace(
@@ -731,13 +745,19 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
         temp_table_name: str,
         output_dt: str,
     ) -> None:
-        writes.append((temp_table_name, output_dt, result["dt"].tolist()))
+        writes.append(
+            (
+                temp_table_name,
+                output_dt,
+                result.set_index("storename")["is_abnormal"].to_dict(),
+            )
+        )
 
     monkeypatch.setattr(hive_task, "sd", types.SimpleNamespace(read_table=read_table))
     monkeypatch.setattr(
         hive_task,
-        "read_filtered_source_hive_table",
-        read_filtered_source_hive_table,
+        "read_source_hive_table_by_parameters",
+        read_source_hive_table_by_parameters,
     )
     monkeypatch.setattr(
         hive_task,
@@ -752,7 +772,7 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
     monkeypatch.setattr(
         hive_task,
         "run_algorithm_one_from_transactions",
-        lambda config, transactions, source_label, source_detail: run_result,
+        lambda config, transactions: run_result,
     )
     monkeypatch.setattr(
         hive_task,
@@ -784,11 +804,21 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
 
     assert reads == [("param_table", ["20260101"])]
     assert partition_reads == [("source_table", ["20260101"])]
-    assert writes == [("temp_table", "20260101", ["20260101"])]
+    assert writes == [
+        (
+            "temp_table",
+                "20260101",
+                {
+                    "shop-a": "3",
+                    "北京市朝阳区商户": "5",
+                },
+        )
+    ]
     assert summary.input_rows == 1
+    assert summary.output_rows == 2
 
 
-def test_hive_parameters_preserve_notebook_decay_tau(
+def test_hive_parameters_preserve_entrypoint_decay_tau(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -809,14 +839,14 @@ def test_hive_parameters_preserve_notebook_decay_tau(
     )
 
     parameters = hive_task.load_hive_algorithm_parameters(parameter_data, "param_table")
-    notebook_config = _app_config(tmp_path)
+    entrypoint_config = _app_config(tmp_path)
     runtime_config = hive_task.build_runtime_config(
         parameters,
         "param_table",
-        notebook_config.cooccurrence.decay_tau_minutes,
+        entrypoint_config.cooccurrence.decay_tau_minutes,
     )
     config = hive_task.apply_runtime_parameters(
-        notebook_config,
+        entrypoint_config,
         runtime_config,
     )
 
@@ -826,7 +856,7 @@ def test_hive_parameters_preserve_notebook_decay_tau(
     assert config.anchors.minimum_community_size == 5
 
 
-def test_filter_source_data_by_parameters_uses_region_only(
+def test_filter_source_data_by_parameters_uses_region_and_storename_city(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
@@ -836,7 +866,7 @@ def test_filter_source_data_by_parameters_uses_region_only(
             {
                 "start_date": "20260101",
                 "end_date": "20260102",
-                "region": "shanghai",
+                "region": "兰州",
                 "max_transaction_time_interval": "120",
                 "min_transaction_number": "3",
                 "min_merchant_count": "3",
@@ -849,23 +879,37 @@ def test_filter_source_data_by_parameters_uses_region_only(
             {
                 "account_number": "u1",
                 "global_flow_number": "f1",
-                "storename": "in-range",
+                "storename": "兰州市城关区商户",
                 "transaction_time": "20260102T100000",
-                "region": "shanghai",
+                "region": "兰州",
             },
             {
                 "account_number": "u2",
                 "global_flow_number": "f2",
-                "storename": "wrong-region",
+                "storename": "酒泉市肃州区商户",
                 "transaction_time": "20260102T100000",
-                "region": "beijing",
+                "region": "兰州",
             },
             {
                 "account_number": "u3",
                 "global_flow_number": "f3",
-                "storename": "out-of-range",
+                "storename": "西安市雁塔区商户",
                 "transaction_time": "20260103T000000",
-                "region": "shanghai",
+                "region": "兰州",
+            },
+            {
+                "account_number": "u4",
+                "global_flow_number": "f4",
+                "storename": "普通商户",
+                "transaction_time": "20260103T000000",
+                "region": "兰州",
+            },
+            {
+                "account_number": "u5",
+                "global_flow_number": "f5",
+                "storename": "上海市商户",
+                "transaction_time": "20260103T000000",
+                "region": "上海",
             },
         ]
     )
@@ -878,7 +922,11 @@ def test_filter_source_data_by_parameters_uses_region_only(
         "param_table",
     )
 
-    assert filtered["storename"].tolist() == ["in-range", "out-of-range"]
+    assert filtered["storename"].tolist() == [
+        "兰州市城关区商户",
+        "酒泉市肃州区商户",
+        "普通商户",
+    ]
     assert hive_task.build_source_dt_list(parameters) == ["20260131"]
 
 

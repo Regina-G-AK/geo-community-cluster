@@ -22,6 +22,10 @@ from business_district.config import (
     VisitConfig,
     apply_runtime_parameters,
 )
+from business_district.cross_region import (
+    append_cross_region_target_output,
+    build_cross_region_target_output,
+)
 from business_district.errors import TransactionDataError
 from business_district.graph import (
     PairStatistics,
@@ -37,7 +41,9 @@ from business_district.hive_task import (
     PARAMETER_TABLE,
     build_runtime_config,
     build_source_dt_list,
+    filter_source_data_by_parameters as filter_initial_source_data_by_parameters,
     load_hive_algorithm_parameters,
+    split_source_data_by_parameters,
 )
 from business_district.intermediate import (
     build_pair_statistics_path,
@@ -216,23 +222,12 @@ def _filter_source_data_by_parameters(
     source_table: str,
     parameter_table: str,
 ) -> pd.DataFrame:
-    missing_columns = sorted({REGION}.difference(set(source_data.columns)))
-    if missing_columns:
-        raise TransactionDataError(
-            "Hive 输入表缺少参数表关联字段: "
-            f"source_table={source_table}, parameter_table={parameter_table}, "
-            f"missing_columns={missing_columns}"
-        )
-    parameter_regions = {parameter.region for parameter in parameters}
-    matched = source_data[REGION].isin(parameter_regions)
-    result = source_data.loc[matched].copy()
-    if result.empty:
-        raise TransactionDataError(
-            "Hive 参数表没有匹配到输入交易: "
-            f"source_table={source_table}, parameter_table={parameter_table}, "
-            f"parameter_count={len(parameters)}, source_rows={len(source_data)}"
-        )
-    return result.reset_index(drop=True)
+    return filter_initial_source_data_by_parameters(
+        source_data,
+        parameters,
+        source_table,
+        parameter_table,
+    )
 
 
 def load_incremental_transactions(
@@ -737,57 +732,99 @@ class TaskMain:
                 f"source_dt={source_dt_list}"
             )
             source_data = sd.read_table(self.task_config.source_table, dt=source_dt_list)
-            filtered_source_data = _filter_source_data_by_parameters(
+            source_selection = split_source_data_by_parameters(
                 source_data,
                 parameters,
                 self.task_config.source_table,
                 self.task_config.parameter_table,
             )
-            transactions = load_incremental_transactions(
-                filtered_source_data,
-                self.task_config.timestamp_formats,
-                self.dt_var,
+            if (
+                source_selection.included.empty
+                and source_selection.cross_region.empty
+            ):
+                raise TransactionDataError(
+                    "Hive 参数表没有匹配到输入交易: "
+                    f"source_table={self.task_config.source_table}, "
+                    f"parameter_table={self.task_config.parameter_table}, "
+                    f"parameter_count={len(parameters)}, "
+                    f"source_rows={len(source_data)}"
+                )
+            filtered_source_data = source_selection.included
+            update_time = datetime.datetime.now().astimezone()
+            if filtered_source_data.empty:
+                target_output = pd.DataFrame(columns=TARGET_COLUMNS)
+                community_rows = 0
+                candidate_count = 0
+                skipped_multi_community_count = 0
+            else:
+                transactions = load_incremental_transactions(
+                    filtered_source_data,
+                    self.task_config.timestamp_formats,
+                    self.dt_var,
+                    self.task_config.source_table,
+                )
+                visits = merge_visits(transactions, self.task_config.visit_config)
+                incremental_statistics = build_pair_statistics(
+                    visits,
+                    cooccurrence_config,
+                    algorithm_config.runtime.process_count,
+                )
+                pair_statistics_path = build_pair_statistics_path(
+                    algorithm_config.output.directory,
+                    algorithm_config.city.code,
+                )
+                statistics = merge_pair_statistics(
+                    read_pair_statistics(pair_statistics_path),
+                    incremental_statistics,
+                )
+                write_pair_statistics(statistics, pair_statistics_path)
+                graph = build_sparse_graph(
+                    statistics,
+                    cooccurrence_config,
+                    self.task_config.graph_config,
+                )
+                source_state = build_source_community_state(
+                    transactions,
+                    self.task_config.source_table,
+                )
+                candidates = load_source_candidates(
+                    transactions,
+                    set(source_state.existing_storenames),
+                    self.dt_var,
+                )
+                coordinates = build_latest_merchant_coordinates(transactions)
+                target_output = build_incremental_output(
+                    candidates,
+                    graph,
+                    source_state.members,
+                    coordinates,
+                    self.task_config.assignment_config,
+                    update_time,
+                    algorithm_config.runtime.process_count,
+                )
+                community_rows = len(source_state.members)
+                candidate_count = len(candidates)
+                skipped_multi_community_count = len(
+                    source_state.skipped_multi_community_storenames
+                )
+            cross_region_output = build_cross_region_target_output(
+                source_selection.cross_region,
+                source_selection.included,
                 self.task_config.source_table,
-            )
-            visits = merge_visits(transactions, self.task_config.visit_config)
-            incremental_statistics = build_pair_statistics(
-                visits,
-                cooccurrence_config,
-                algorithm_config.runtime.process_count,
-            )
-            pair_statistics_path = build_pair_statistics_path(
-                algorithm_config.output.directory,
-                algorithm_config.city.code,
-            )
-            statistics = merge_pair_statistics(
-                read_pair_statistics(pair_statistics_path),
-                incremental_statistics,
-            )
-            write_pair_statistics(statistics, pair_statistics_path)
-            graph = build_sparse_graph(
-                statistics,
-                cooccurrence_config,
-                self.task_config.graph_config,
-            )
-            source_state = build_source_community_state(
-                transactions,
-                self.task_config.source_table,
-            )
-            candidates = load_source_candidates(
-                transactions,
-                set(source_state.existing_storenames),
                 self.dt_var,
+                update_time,
             )
-            coordinates = build_latest_merchant_coordinates(transactions)
-            target_output = build_incremental_output(
-                candidates,
-                graph,
-                source_state.members,
-                coordinates,
-                self.task_config.assignment_config,
-                datetime.datetime.now().astimezone(),
-                algorithm_config.runtime.process_count,
+            target_output = append_cross_region_target_output(
+                target_output,
+                cross_region_output,
             )
+            if target_output.empty:
+                raise TransactionDataError(
+                    "参数匹配交易中没有可输出的分类 1、2 商户: "
+                    f"source_table={self.task_config.source_table}, "
+                    f"included_rows={len(source_selection.included)}, "
+                    f"cross_region_rows={len(source_selection.cross_region)}"
+                )
             insert_new_target_rows(
                 sd,
                 target_output,
@@ -797,15 +834,16 @@ class TaskMain:
             )
             logrecord.log_data(
                 f"incremental taskrun seconds={time.time() - total_start:.2f}, "
-                f"candidate_count={len(candidates)}, inserted_rows={len(target_output)}, "
+                f"candidate_count={candidate_count}, "
+                f"inserted_rows={len(target_output)}, "
                 f"skipped_multi_community_count="
-                f"{len(source_state.skipped_multi_community_storenames)}"
+                f"{skipped_multi_community_count}"
             )
             return HiveTaskSummary(
                 dt=self.dt_var,
                 source_rows=len(filtered_source_data),
-                community_rows=len(source_state.members),
-                candidate_count=len(candidates),
+                community_rows=community_rows,
+                candidate_count=candidate_count,
                 inserted_rows=len(target_output),
                 target_table=self.task_config.target_table,
             )
@@ -833,8 +871,8 @@ def run_hive_task(task_config: HiveTaskConfig) -> HiveTaskSummary:
 
 def main() -> None:
     raise RuntimeError(
-        "项目不再提供代码内默认配置，请通过 "
-        "notebooks/run_hive_business_district.ipynb 构造 HiveTaskConfig 并运行"
+        "项目不再提供代码内默认配置，请运行项目根目录的 "
+        "run_hive_business_district.py"
     )
 
 

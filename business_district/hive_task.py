@@ -19,6 +19,10 @@ from business_district.config import (
     AlgorithmRuntimeConfig,
     apply_runtime_parameters,
 )
+from business_district.cross_region import (
+    append_cross_region_target_output,
+    build_cross_region_target_output,
+)
 from business_district.errors import TransactionDataError
 from business_district.graph import build_sparse_graph
 from business_district.intermediate import (
@@ -27,12 +31,12 @@ from business_district.intermediate import (
 )
 from business_district.pipeline import run_algorithm_one_from_transactions
 from business_district.probes import print_dataframe_probe, print_probe
-# 线上任务暂不启用资源监测
-# from business_district.resource_usage import record_resource_phase
+from business_district.region_filter import build_storename_city_mask
 from business_district.status_codes import format_status_code
 from business_district.transactions import (
     MERCHANT,
     RAW_BUSINESS_DISTRICT,
+    RAW_MERCHANT,
     REGION,
     load_hive_transactions,
 )
@@ -226,6 +230,12 @@ class HiveAlgorithmParameter:
     is_daily: bool
 
 
+@dataclass(frozen=True)
+class SourceDataSelection:
+    included: pd.DataFrame
+    cross_region: pd.DataFrame
+
+
 def _clean_text(value: object) -> str:
     if pd.isna(value):
         return ""
@@ -404,25 +414,53 @@ def build_source_dt_list(parameters: List[HiveAlgorithmParameter]) -> List[str]:
     return sorted(dates)
 
 
-def _select_source_data_by_parameters(
+def split_source_data_by_parameters(
     source_data: pd.DataFrame,
     parameters: List[HiveAlgorithmParameter],
     source_table: str,
     parameter_table: str,
-) -> pd.DataFrame:
+) -> SourceDataSelection:
     # source.columns = source.columns.astype("string").str.strip()
-    missing_columns = sorted({REGION}.difference(set(source_data.columns)))
+    missing_columns = sorted(
+        {RAW_MERCHANT, REGION}.difference(set(source_data.columns))
+    )
     if missing_columns:
         raise TransactionDataError(
             "Hive 输入表缺少参数表关联字段: "
             f"source_table={source_table}, parameter_table={parameter_table}, "
             f"missing_columns={missing_columns}"
         )
-    matched = pd.Series(False, index=source_data.index)
+    included = pd.Series(False, index=source_data.index)
+    cross_region = pd.Series(False, index=source_data.index)
     source_region = source_data[REGION]
     for parameter in parameters:
-        matched = matched | source_region.eq(parameter.region)
-    return source_data.loc[matched].copy()
+        region_matched = source_region.eq(parameter.region)
+        storename_matched = build_storename_city_mask(
+            source_data[RAW_MERCHANT],
+            parameter.region,
+        )
+        included = included | (region_matched & storename_matched)
+        cross_region = cross_region | (
+            region_matched & ~storename_matched
+        )
+    return SourceDataSelection(
+        included=source_data.loc[included].copy(),
+        cross_region=source_data.loc[cross_region].copy(),
+    )
+
+
+def _select_source_data_by_parameters(
+    source_data: pd.DataFrame,
+    parameters: List[HiveAlgorithmParameter],
+    source_table: str,
+    parameter_table: str,
+) -> pd.DataFrame:
+    return split_source_data_by_parameters(
+        source_data,
+        parameters,
+        source_table,
+        parameter_table,
+    ).included
 
 
 def filter_source_data_by_parameters(
@@ -454,39 +492,79 @@ def read_filtered_source_hive_table(
     parameters: List[HiveAlgorithmParameter],
     parameter_table: str,
 ) -> pd.DataFrame:
-    dataframes: List[pd.DataFrame] = []
+    selection = read_source_hive_table_by_parameters(
+        table_name,
+        dt_values,
+        parameters,
+        parameter_table,
+    )
+    if selection.included.empty:
+        raise TransactionDataError(
+            "Hive 参数表没有匹配到可参与聚类的输入交易: "
+            f"source_table={table_name}, parameter_table={parameter_table}, "
+            f"parameter_count={len(parameters)}, "
+            f"cross_region_rows={len(selection.cross_region)}"
+        )
+    return selection.included
+
+
+def read_source_hive_table_by_parameters(
+    table_name: str,
+    dt_values: List[str],
+    parameters: List[HiveAlgorithmParameter],
+    parameter_table: str,
+) -> SourceDataSelection:
+    included_dataframes: List[pd.DataFrame] = []
+    cross_region_dataframes: List[pd.DataFrame] = []
+    empty_template = pd.DataFrame()
     source_rows = 0
     for dataframe, dt_text in _iter_partitioned_hive_table_parts(
         table_name,
         dt_values,
     ):
         source_rows += len(dataframe)
-        filtered = _select_source_data_by_parameters(
+        selection = split_source_data_by_parameters(
             dataframe,
             parameters,
             table_name,
             parameter_table,
         )
-        if filtered.empty:
-            continue
-        filtered = _with_partition_dt(filtered, dt_text)
-        dataframes.append(filtered)
+        empty_template = _with_partition_dt(dataframe.iloc[0:0], dt_text)
+        if not selection.included.empty:
+            included_dataframes.append(
+                _with_partition_dt(selection.included, dt_text)
+            )
+        if not selection.cross_region.empty:
+            cross_region_dataframes.append(
+                _with_partition_dt(selection.cross_region, dt_text)
+            )
 
     if source_rows == 0:
         raise TransactionDataError(
             "Hive 日期范围内没有非空分区: "
             f"table={table_name}, dt_values={dt_values}"
         )
-    if not dataframes:
+    if not included_dataframes and not cross_region_dataframes:
         raise TransactionDataError(
             "Hive 参数表没有匹配到输入交易: "
             f"source_table={table_name}, parameter_table={parameter_table}, "
             f"parameter_count={len(parameters)}, source_rows={source_rows}"
         )
 
-    result = pd.concat(dataframes, ignore_index=True, copy=False)
-    # print_dataframe_probe("Hive参数过滤结果", result)
-    return result
+    included = (
+        pd.concat(included_dataframes, ignore_index=True, copy=False)
+        if included_dataframes
+        else empty_template.copy()
+    )
+    cross_region = (
+        pd.concat(cross_region_dataframes, ignore_index=True, copy=False)
+        if cross_region_dataframes
+        else empty_template.copy()
+    )
+    return SourceDataSelection(
+        included=included,
+        cross_region=cross_region,
+    )
 
 
 def _format_hive_id(value: object) -> str:
@@ -792,41 +870,62 @@ class TaskMain:
             logrecord.log_data(
                 f"task parameter_dt={parameter_dt_list}, source_dt={source_dt_list}"
             )
-            filtered_source_data = read_filtered_source_hive_table(
+            source_selection = read_source_hive_table_by_parameters(
                 self.task_config.source_table,
                 source_dt_list,
                 parameters,
                 self.task_config.parameter_table,
             )
-            transactions = load_hive_transactions(
-                filtered_source_data,
-                config.input.timestamp_formats,
-                self.dt_var,
+            filtered_source_data = source_selection.included
+            update_time = datetime.datetime.now().astimezone()
+            if filtered_source_data.empty:
+                transactions = pd.DataFrame()
+                target_output = pd.DataFrame(columns=TARGET_COLUMNS)
+                output_directory = str(config.output.directory)
+            else:
+                transactions = load_hive_transactions(
+                    filtered_source_data,
+                    config.input.timestamp_formats,
+                    self.dt_var,
+                    self.task_config.source_table,
+                )
+                result = run_algorithm_one_from_transactions(
+                    config,
+                    transactions,
+                )
+                target_output = build_hive_target_output(
+                    result.business_results,
+                    self.dt_var,
+                    runtime_config.minimum_community_size,
+                )
+                target_output = build_initial_assignment_output(
+                    target_output,
+                    transactions,
+                    config,
+                    self.task_config.assignment_config,
+                    self.task_config.source_table,
+                    self.dt_var,
+                    runtime_config.minimum_community_size,
+                )
+                output_directory = result.summary.output_directory
+            cross_region_output = build_cross_region_target_output(
+                source_selection.cross_region,
+                source_selection.included,
                 self.task_config.source_table,
-            )
-            result = run_algorithm_one_from_transactions(
-                config,
-                transactions,
-                "Hive输入表",
-                (
-                    f"{self.task_config.source_table}, source_dt={source_dt_list}, "
-                    f"{self.task_config.parameter_table}, dt={parameter_dt_list}"
-                ),
-            )
-            target_output = build_hive_target_output(
-                result.business_results,
                 self.dt_var,
-                runtime_config.minimum_community_size,
+                update_time,
             )
-            target_output = build_initial_assignment_output(
+            target_output = append_cross_region_target_output(
                 target_output,
-                transactions,
-                config,
-                self.task_config.assignment_config,
-                self.task_config.source_table,
-                self.dt_var,
-                runtime_config.minimum_community_size,
+                cross_region_output,
             )
+            if target_output.empty:
+                raise TransactionDataError(
+                    "参数匹配交易中没有可输出的分类 1、2 商户: "
+                    f"source_table={self.task_config.source_table}, "
+                    f"included_rows={len(source_selection.included)}, "
+                    f"cross_region_rows={len(source_selection.cross_region)}"
+                )
             overwrite_target_table(
                 sd,
                 target_output,
@@ -837,13 +936,13 @@ class TaskMain:
             logrecord.log_data(
                 f"taskrun seconds={time.time() - total_start:.2f}, "
                 f"output_rows={len(target_output)}, "
-                f"output_directory={result.summary.output_directory}"
+                f"output_directory={output_directory}"
             )
             summary = HiveTaskSummary(
                 dt=self.dt_var,
                 input_rows=len(filtered_source_data),
                 output_rows=len(target_output),
-                output_directory=result.summary.output_directory,
+                output_directory=output_directory,
                 target_table=self.task_config.target_table,
             )
         except Exception as error:
@@ -876,8 +975,8 @@ def run_hive_task(task_config: HiveTaskConfig) -> HiveTaskSummary:
 
 def main() -> None:
     raise RuntimeError(
-        "项目不再提供代码内默认配置，请通过 "
-        "notebooks/run_hive_business_district.ipynb 构造 HiveTaskConfig 并运行"
+        "项目不再提供代码内默认配置，请运行项目根目录的 "
+        "run_hive_business_district.py"
     )
 
 

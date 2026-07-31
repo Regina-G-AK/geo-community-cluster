@@ -21,20 +21,6 @@
 
 - 技能路径：/skills
 
-## 聚类实验工作流
-
-- 每次聚类运行都必须在结果成功落盘后，自动向 `docs/experiments.md` 追加一条实验记录
-- 实验记录必须包含运行时间、数据来源、完整参数快照和总耗时，保证结果可复现
-- 地理种子阶段必须报告坐标交易行数、坐标商户数、同名商户拆分出的门店实体数、种子簇数量和种子边数量
-- 统计必须覆盖全部商户、原始商户对、最小支持人数、SPPMI、互为 top-k、迭代 hub 清洗和有效社区规模过滤等阶段的商户与边数量
-- 全部商户及后续阶段统计仅覆盖 `merchant_category` 为 `1`、`2` 的商户；分类 `2` 必须按非锚点多社区普通成员统计
-- 社区结果统一报告全部社区、孤立商户、商户数不少于 3 的有效社区、商户数不少于 10 的较大社区，以及有效社区商户占全部商户的比例
-- 锚点结果必须报告候选锚点总数、单社区最大锚点数和无效社区锚点数
-- 自动分析至少指出商户损失最大的阶段、最小支持人数过滤保留率、有效社区覆盖率和未覆盖商户数
-- 未执行 SPPMI 的实验必须将该阶段标记为已跳过，沿用最小支持人数过滤后的商户与边数量，并按零损失处理且不参与最大损失阶段竞争
-- 参数实验必须保留上一版结果并使用新输出目录，不得覆盖用于对比的历史结果
-- 修改实验统计口径时，必须同步更新自动记录逻辑、README、测试和本节说明
-
 ## Plans
 
 If the user specifically asks for a plan, present the summary of a plan and wait for user confirmation before proceeding with any code modifications. Do not do extensive research prior to presenting the plan. Succinctly summarize the task and the main requirements using informal but terse language (no need to use RFC 2119 modal verbs). If the task is clear from the prompt, ask the user if the plan looks good before proceeding. If there are aspects of the plan that require clarification or there are design tradeoffs, ask the user up to four questions. In cases where there is a clear choice between two or three options, phrase the question as multiple choice so the user can simply reply with A, B, C, etc. Do not modify any code until the user tells you that the plan is acceptable.

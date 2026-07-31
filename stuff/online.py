@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import math
 import time
-import tracemalloc
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -664,15 +663,9 @@ def run_clustering(
 
 
 if __name__ == "__main__":
-    tracemalloc.start()
     run_clustering(
         INPUT_PATH,
         MERCHANT_OUTPUT_PATH,
         COMMUNITY_OUTPUT_PATH,
         EDGE_OUTPUT_PATH,
-    )
-    current_memory, peak_memory = tracemalloc.get_traced_memory()
-    print(
-        f"当前内存: {current_memory / 1024 / 1024:.2f} MB，"
-        f"峰值内存: {peak_memory / 1024 / 1024:.2f} MB"
     )

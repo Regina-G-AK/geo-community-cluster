@@ -22,7 +22,7 @@
 - 当 `is_chain_like=1` 商户的候选边投票只覆盖一个最终社区时，系统 MUST 保留其单社区普通成员记录，并设置 `is_multi_community_member=0`。
 - 普通商户的多商圈展开 MUST 继续使用最终清洗图的社区边权分布，不得被访问量规则影响。
 - 系统 MUST 输出 `chain_visit_count_threshold` 和 `connected_community_count` 作为排查字段。
-- 运行摘要和实验记录 MUST 记录连锁/泛客群商户总数，以及由访问量规则命中的商户数量。
+- 运行摘要 MUST 记录连锁/泛客群商户总数，以及由访问量规则命中的商户数量。
 
 ## Design
 

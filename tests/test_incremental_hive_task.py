@@ -437,7 +437,7 @@ def test_hive_task_config_uses_explicit_algorithm_config(
     assert config.parameter_table == "parameter_table"
 
 
-def test_incremental_cooccurrence_config_uses_notebook_decay_tau(
+def test_incremental_cooccurrence_config_uses_entrypoint_decay_tau(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
@@ -514,7 +514,7 @@ def test_source_community_state_skips_multi_community_members(
     assert state.skipped_multi_community_storenames == frozenset({"multi"})
 
 
-def test_filter_source_data_by_parameters_only_filters_region(
+def test_filter_source_data_by_parameters_filters_region_and_storename_city(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
@@ -524,7 +524,7 @@ def test_filter_source_data_by_parameters_only_filters_region(
             {
                 "start_date": "20260101",
                 "end_date": "20260102",
-                "region": "shanghai",
+                "region": "兰州",
                 "max_transaction_time_interval": "90",
                 "min_transaction_number": "1",
                 "min_merchant_count": "3",
@@ -535,19 +535,29 @@ def test_filter_source_data_by_parameters_only_filters_region(
     source_data = pd.DataFrame(
         [
             {
-                "storename": "inside-date-range",
+                "storename": "兰州市城关区商户",
                 "transaction_time": "20260101T100000",
-                "region": "shanghai",
+                "region": "兰州",
             },
             {
-                "storename": "outside-date-range",
+                "storename": "酒泉市肃州区商户",
                 "transaction_time": "20260103T100000",
-                "region": "shanghai",
+                "region": "兰州",
             },
             {
-                "storename": "other-region",
+                "storename": "西安市雁塔区商户",
                 "transaction_time": "20260101T100000",
-                "region": "beijing",
+                "region": "兰州",
+            },
+            {
+                "storename": "普通商户",
+                "transaction_time": "20260104T100000",
+                "region": "兰州",
+            },
+            {
+                "storename": "上海市商户",
+                "transaction_time": "20260101T100000",
+                "region": "上海",
             },
         ]
     )
@@ -564,8 +574,9 @@ def test_filter_source_data_by_parameters_only_filters_region(
     )
 
     assert filtered["storename"].tolist() == [
-        "inside-date-range",
-        "outside-date-range",
+        "兰州市城关区商户",
+        "酒泉市肃州区商户",
+        "普通商户",
     ]
 
 
@@ -629,6 +640,19 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "is_abnormal": "1",
                 "business_district": "D001",
             },
+            {
+                "account_number": "u3",
+                "global_flow_number": "f4",
+                "storename": "北京市朝阳区商户",
+                "merchant_category": "1",
+                "transaction_time": "20260103T110000",
+                "pos_longitude": "",
+                "pos_latitude": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "is_abnormal": "",
+                "business_district": "",
+            },
         ]
     )
     fake_sd = _FakeTaskSd(parameter_data, source_data)
@@ -672,9 +696,12 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
     assert ("source_table", ["20260131"]) in fake_sd.reads
     assert summary.source_rows == 3
     assert summary.community_rows == 1
-    assert summary.inserted_rows == 1
-    assert fake_sd.tables[0].loc[0, "storename"] == "new-shop"
-    assert fake_sd.tables[0].loc[0, "community_id"] == "D001"
+    assert summary.inserted_rows == 2
+    output_by_storename = fake_sd.tables[0].set_index("storename")
+    assert output_by_storename.loc["new-shop", "community_id"] == "D001"
+    assert output_by_storename.loc["new-shop", "is_abnormal"] == "1"
+    assert output_by_storename.loc["北京市朝阳区商户", "community_id"] == ""
+    assert output_by_storename.loc["北京市朝阳区商户", "is_abnormal"] == "5"
     assert "partition (dt=20260101)" in "\n".join(fake_sd.sql).lower()
     with (output_directory / "pair_statistics_shanghai.pkl").open("rb") as file:
         statistics = pickle.load(file)

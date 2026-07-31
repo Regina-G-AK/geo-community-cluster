@@ -906,8 +906,6 @@ def test_pipeline_uses_geographic_seed_and_pmi_to_join_unpositioned_merchant(
     run_result = run_algorithm_one_from_transactions(
         config,
         load_transactions(config.input),
-        "test",
-        "test",
     )
 
     result = run_result.business_results
@@ -975,8 +973,6 @@ def test_pipeline_marks_high_visit_merchant_as_suspect_chain_store(
     run_result = run_algorithm_one_from_transactions(
         config,
         load_transactions(config.input),
-        "test",
-        "test",
     )
 
     chain_row = run_result.business_results.loc[
@@ -1031,8 +1027,6 @@ def test_pipeline_writes_intermediate_output_only(tmp_path: Path) -> None:
     run_result = run_algorithm_one_from_transactions(
         config,
         load_transactions(config.input),
-        "test",
-        "test",
     )
     summary = run_result.summary
 

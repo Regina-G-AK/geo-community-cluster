@@ -31,8 +31,6 @@ from business_district.results import (
     filter_merchants_by_community_size,
     identify_chain_like_merchants,
 )
-# 线上任务暂不启用资源监测
-# from business_district.resource_usage import record_resource_phase
 from business_district.transactions import (
     MERCHANT,
     MERCHANT_CATEGORY,
@@ -61,8 +59,6 @@ class RunResult:
 def run_algorithm_one_from_transactions(
     config: AppConfig,
     transactions: pd.DataFrame,
-    source: str,
-    source_detail: str,
 ) -> RunResult:
     started_at = datetime.now().astimezone()
     output_directory = config.output.directory
@@ -70,35 +66,28 @@ def run_algorithm_one_from_transactions(
         transactions,
         config.geo.cluster_radius_meters,
     )
-    # record_resource_phase("地理种子准备")
     prepared_transactions = geographic_preparation.transactions
     merchant_coordinates = build_merchant_coordinates(prepared_transactions)
     merchant_metadata = build_merchant_metadata(prepared_transactions)
-    # record_resource_phase("商户元数据构建")
     visits = merge_visits(prepared_transactions, config.visits)
-    # record_resource_phase("访问合并")
     statistics: PairStatistics = build_pair_statistics(
         visits,
         config.cooccurrence,
         config.runtime.process_count,
     )
-    # record_resource_phase("商户对统计")
     write_pair_statistics(
         statistics,
         build_pair_statistics_path(output_directory, config.city.code),
     )
-    # record_resource_phase("商户对中间文件写入")
     transaction_graph = build_sparse_graph(
         statistics,
         config.cooccurrence,
         config.graph,
     )
-    # record_resource_phase("交易图构建")
     graph = add_geographic_seed_edges(
         transaction_graph,
         geographic_preparation.seed_pairs,
     )
-    # record_resource_phase("地理种子边合并")
     chain_visit_count_threshold = calculate_chain_visit_count_threshold(
         list(statistics.merchant_visit_counts.values()),
         config.anchors,
@@ -116,28 +105,23 @@ def run_algorithm_one_from_transactions(
     chain_like_merchant_ids = (
         category_chain_merchant_ids | visit_count_chain_merchant_ids
     )
-    # record_resource_phase("连锁商户识别")
     clustering_graph = graph.copy()
     clustering_graph.remove_nodes_from(chain_like_merchant_ids)
-    # record_resource_phase("聚类图准备")
     cleaning: CleaningResult = clean_graph(
         clustering_graph,
         config.community,
         merchant_coordinates,
         config.geo.cluster_radius_meters,
     )
-    # record_resource_phase("社区清洗")
     edge_candidates = calculate_edge_candidates(
         statistics,
         config.cooccurrence,
         config.graph,
     )
-    # record_resource_phase("候选边计算")
     candidate_community_shares = calculate_candidate_community_weight_shares(
         edge_candidates,
         cleaning.partition,
     )
-    # record_resource_phase("社区权重占比计算")
     raw_merchants = build_merchant_results(
         cleaning,
         statistics,
@@ -148,25 +132,21 @@ def run_algorithm_one_from_transactions(
         chain_visit_count_threshold,
         config.city.code,
     )
-    # record_resource_phase("商户结果构建")
     merchants = filter_merchants_by_community_size(
         raw_merchants,
         config.anchors.minimum_community_size,
     )
-    # record_resource_phase("有效社区过滤")
     communities = build_community_results(
         merchants,
         visits,
         config.city.code,
     )
-    # record_resource_phase("社区结果构建")
     business_results = build_business_results(
         raw_merchants,
         merchant_metadata,
         started_at,
         config.anchors.minimum_community_size,
     )
-    # record_resource_phase("业务结果构建")
     return RunResult(
         summary=RunSummary(
             input_rows=len(transactions),
@@ -182,11 +162,8 @@ def run_algorithm_one_from_transactions(
 
 def run_algorithm_one(config: AppConfig) -> RunSummary:
     transactions = load_transactions(config.input)
-    # record_resource_phase("本地交易文件读取")
     result = run_algorithm_one_from_transactions(
         config,
         transactions,
-        "原始交易",
-        str(config.input.transactions_path),
     )
     return result.summary

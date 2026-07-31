@@ -26,13 +26,6 @@ from business_district.hive_task import (
     TaskMain as InitialTaskMain,
     load_hive_algorithm_parameters,
 )
-# 线上任务暂不启用资源监测
-# from business_district.resource_usage import (
-#     capture_resource_usage,
-#     print_resource_usage,
-#     start_resource_tracking,
-#     stop_resource_tracking,
-# )
 from incremental_assignment.hive_task import (
     HiveTaskConfig as IncrementalHiveTaskConfig,
     HiveTaskSummary as IncrementalHiveTaskSummary,
@@ -180,11 +173,8 @@ def run_task(task: HiveTask) -> HiveTaskSummary:
         summary = task.taskrun()
     finally:
         task.destroy()
-        # resource_usage = capture_resource_usage(resource_started_at)
-        # stop_resource_tracking()
         taskfinish.finish_task()
 
-    # print_resource_usage(resource_usage)
     return summary
 
 
@@ -215,8 +205,6 @@ def main() -> None:
     task_mode = "incremental_assignment" if is_daily else "initial_clustering"
     print(f"task_mode={task_mode}, parameter_dt={parameter_dt}, is_daily={is_daily}")
 
-    # 线上任务暂不启用资源监测
-    # resource_started_at = start_resource_tracking()
     task: HiveTask
     if is_daily:
         task = IncrementalTaskMain(incremental_task_config)

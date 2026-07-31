@@ -5,7 +5,6 @@ import datetime
 from collections import Counter, defaultdict
 from shutil import copyfile
 
-import tracemalloc
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -732,7 +731,6 @@ class TaskMain:
 
 
 if __name__ == "__main__":
-    tracemalloc.start()
     start_time = datetime.datetime.now()
     task = TaskMain()
 
@@ -745,9 +743,4 @@ if __name__ == "__main__":
     end_time = datetime.datetime.now()
     time_difference = end_time - start_time
     logrecord.log_data(f"task use time {time_difference}")
-    current_memory, peak_memory = tracemalloc.get_traced_memory()
-    print(
-        f"memory_current_mb = {current_memory / 1024 / 1024:.2f},"
-        f"memory_peak_mb = {peak_memory / 1024 / 1024:.2f}"
-    )
     taskfinish.finish_task()
