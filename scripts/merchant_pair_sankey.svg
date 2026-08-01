@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1490" viewBox="0 0 1800 1490" role="img" aria-labelledby="chart-title chart-desc">
+  <title id="chart-title">上海1至6月线下交易商户商圈聚类全流程桑基图</title>
+  <desc id="chart-desc">展示上海商户从总商户、线下商户、线下非个体户、形成交易对、有效交易对商户到能够形成商圈商户的转化，同时展示交易量转化和交易对有效率。</desc>
+  <defs>
+    <filter id="surface-shadow" x="-10%" y="-20%" width="120%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="14" flood-color="#16325C" flood-opacity="0.10"/>
+    </filter>
+  </defs>
+  <style>
+    text {
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    }
+    .background { fill: #F4F7FC; }
+    .surface { fill: #FFFFFF; filter: url(#surface-shadow); }
+    .main-title { fill: #102A43; font-size: 28px; font-weight: 700; text-anchor: middle; }
+    .subtitle { fill: #627D98; font-size: 15px; text-anchor: middle; }
+    .section-title { fill: #243B53; font-size: 19px; font-weight: 700; }
+    .flow { stroke: none; }
+    .flow-merchant { fill: #60A5FA; fill-opacity: 0.58; }
+    .flow-transaction { fill: #A78BFA; fill-opacity: 0.58; }
+    .flow-geographic { fill: #22D3EE; fill-opacity: 0.72; }
+    .flow-pair-assigned { fill: #F472B6; fill-opacity: 0.78; }
+    .flow-pair-effective { fill: #A78BFA; fill-opacity: 0.78; }
+    .flow-loss { fill: #CBD5E1; fill-opacity: 0.62; }
+    .node-title { fill: #486581; font-size: 14px; }
+    .node-value { fill: #102A43; font-size: 20px; font-weight: 700; }
+    .node-rate { fill: #829AB1; font-size: 12px; }
+    .loss-title { fill: #627D98; font-size: 13px; }
+    .loss-value { fill: #829AB1; font-size: 17px; font-weight: 700; }
+    .cyan-value { fill: #0E7490; }
+    .pink-value { fill: #BE185D; }
+    .transition-note { fill: #0F766E; font-size: 13px; font-weight: 700; text-anchor: middle; }
+    .scope-label { fill: #486581; font-size: 14px; text-anchor: middle; }
+  </style>
+  <rect class="background" width="1800" height="1490" rx="24"/>
+  <rect class="surface" x="24" y="102" width="1752" height="486" rx="22"/>
+  <rect class="surface" x="24" y="606" width="1752" height="500" rx="22"/>
+  <rect class="surface" x="24" y="1124" width="1752" height="276" rx="22"/>
+  <text class="main-title" x="900" y="45">上海1—6月线下交易商户商圈聚类全流程桑基图</text>
+  <text class="subtitle" x="900" y="76">商户、交易量与交易对采用独立单位和独立宽度比例</text>
+  
+    <g aria-label="商户转化桑基图">
+      <text class="section-title" x="62" y="132">商户转化流（单位：户）</text>
+      <path class="flow flow-merchant" d="M 88.0 245.0 C 202.1 245.0, 221.9 245.0, 336.0 245.0 L 336.0 441.6 C 221.9 441.6, 202.1 441.6, 88.0 441.6 Z"/>
+<path class="flow flow-loss" d="M 88.0 441.6 C 202.1 441.6, 221.9 420.0, 336.0 420.0 L 336.0 503.4 C 221.9 503.4, 202.1 525.0, 88.0 525.0 Z"/>
+<rect x="336.0" y="420.0" width="16" height="83.4" rx="5" fill="#CBD5E1"/>
+<path class="flow flow-merchant" d="M 352.0 245.0 C 466.1 245.0, 485.9 245.0, 600.0 245.0 L 600.0 403.1 C 485.9 403.1, 466.1 403.1, 352.0 403.1 Z"/>
+<path class="flow flow-loss" d="M 352.0 403.1 C 466.1 403.1, 485.9 420.0, 600.0 420.0 L 600.0 458.5 C 485.9 458.5, 466.1 441.6, 352.0 441.6 Z"/>
+<rect x="600.0" y="420.0" width="16" height="38.5" rx="5" fill="#CBD5E1"/>
+<path class="flow flow-merchant" d="M 616.0 245.0 C 730.1 245.0, 749.9 245.0, 864.0 245.0 L 864.0 292.2 C 749.9 292.2, 730.1 292.2, 616.0 292.2 Z"/>
+<path class="flow flow-loss" d="M 616.0 292.2 C 730.1 292.2, 749.9 420.0, 864.0 420.0 L 864.0 530.9 C 749.9 530.9, 730.1 403.1, 616.0 403.1 Z"/>
+<rect x="864.0" y="420.0" width="16" height="110.9" rx="5" fill="#CBD5E1"/>
+<path class="flow flow-merchant" d="M 880.0 245.0 C 994.1 245.0, 1013.9 245.0, 1128.0 245.0 L 1128.0 253.4 C 1013.9 253.4, 994.1 253.4, 880.0 253.4 Z"/>
+<path class="flow flow-loss" d="M 880.0 253.4 C 994.1 253.4, 1013.9 420.0, 1128.0 420.0 L 1128.0 458.8 C 1013.9 458.8, 994.1 292.2, 880.0 292.2 Z"/>
+<rect x="1128.0" y="420.0" width="16" height="38.8" rx="5" fill="#CBD5E1"/>
+<path class="flow flow-merchant" d="M 1144.0 245.0 C 1258.1 245.0, 1277.9 245.0, 1392.0 245.0 L 1392.0 250.6 C 1277.9 250.6, 1258.1 250.6, 1144.0 250.6 Z"/>
+<path class="flow flow-loss" d="M 1144.0 250.6 C 1258.1 250.6, 1277.9 420.0, 1392.0 420.0 L 1392.0 422.8 C 1277.9 422.8, 1258.1 253.4, 1144.0 253.4 Z"/>
+<rect x="1392.0" y="420.0" width="16" height="2.8" rx="5" fill="#CBD5E1"/>
+<rect x="72.0" y="245.0" width="16" height="280.0" rx="5" fill="#2563EB"/>
+<rect x="336.0" y="245.0" width="16" height="196.6" rx="5" fill="#4F46E5"/>
+<rect x="600.0" y="245.0" width="16" height="158.1" rx="5" fill="#7C3AED"/>
+<rect x="864.0" y="245.0" width="16" height="47.2" rx="5" fill="#0891B2"/>
+<rect x="1128.0" y="245.0" width="16" height="8.4" rx="5" fill="#0F766E"/>
+<rect x="1392.0" y="245.0" width="16" height="5.6" rx="5" fill="#059669"/>
+      <text class="node-title" x="80.0" y="174.0" text-anchor="middle">上海总商户量</text><text class="node-value" x="80.0" y="198.0" text-anchor="middle">2,734,405</text><text class="node-rate" x="80.0" y="218.0" text-anchor="middle">占首阶段 100.00%</text>
+<text class="node-title" x="344.0" y="174.0" text-anchor="middle">线下商户量</text><text class="node-value" x="344.0" y="198.0" text-anchor="middle">1,920,000</text><text class="node-rate" x="344.0" y="218.0" text-anchor="middle">占首阶段 70.22%</text>
+<text class="node-title" x="608.0" y="174.0" text-anchor="middle">线下非个体户量</text><text class="node-value" x="608.0" y="198.0" text-anchor="middle">1,544,373</text><text class="node-rate" x="608.0" y="218.0" text-anchor="middle">占首阶段 56.48%</text>
+<text class="node-title" x="872.0" y="174.0" text-anchor="middle">能形成交易对的商户</text><text class="node-value" x="872.0" y="198.0" text-anchor="middle">461,097</text><text class="node-rate" x="872.0" y="218.0" text-anchor="middle">占首阶段 16.86%</text>
+<text class="node-title" x="1136.0" y="174.0" text-anchor="middle">有效交易对商户</text><text class="node-value" x="1136.0" y="198.0" text-anchor="middle">82,345</text><text class="node-rate" x="1136.0" y="218.0" text-anchor="middle">占首阶段 3.01%</text>
+<text class="node-title" x="1400.0" y="174.0" text-anchor="middle">能够形成商圈的商户</text><text class="node-value" x="1400.0" y="198.0" text-anchor="middle">54,828</text><text class="node-rate" x="1400.0" y="218.0" text-anchor="middle">占首阶段 2.01%</text>
+      <text class="loss-title" x="344.0" y="392.0" text-anchor="middle">非线下商户</text><text class="loss-value" x="344.0" y="414.0" text-anchor="middle">814,405</text>
+<text class="loss-title" x="608.0" y="392.0" text-anchor="middle">个体户等</text><text class="loss-value" x="608.0" y="414.0" text-anchor="middle">375,627</text>
+<text class="loss-title" x="872.0" y="392.0" text-anchor="middle">未形成交易对</text><text class="loss-value" x="872.0" y="414.0" text-anchor="middle">1,083,276</text>
+<text class="loss-title" x="1136.0" y="392.0" text-anchor="middle">未达 support≥2</text><text class="loss-value" x="1136.0" y="414.0" text-anchor="middle">378,752</text>
+<text class="loss-title" x="1400.0" y="392.0" text-anchor="middle">有效但未形成商圈</text><text class="loss-value" x="1400.0" y="414.0" text-anchor="middle">27,517</text>
+      <path class="flow flow-geographic" d="M 1408.0 245.0 C 1519.3 245.0, 1538.7 245.0, 1650.0 245.0 L 1650.0 249.5 C 1538.7 249.5, 1519.3 249.5, 1408.0 249.5 Z"/>
+      <path class="flow flow-pair-assigned" d="M 1408.0 249.5 C 1519.3 249.5, 1538.7 298.0, 1650.0 298.0 L 1650.0 299.2 C 1538.7 299.2, 1519.3 250.6, 1408.0 250.6 Z"/>
+      <rect x="1650.0" y="245.0" width="16" height="4.5" rx="5" fill="#0891B2"/>
+      <rect x="1650.0" y="298.0" width="16" height="2.0" rx="5" fill="#DB2777"/>
+      <text class="node-title" x="1676" y="236">经纬度直接添加</text>
+      <text class="node-value cyan-value" x="1676" y="260">43,569</text>
+      <text class="node-rate" x="1676" y="280">占形成商圈 79.46%</text>
+      <text class="node-title" x="1676" y="294">交易对添加</text>
+      <text class="node-value pink-value" x="1676" y="318">11,259</text>
+      <text class="node-rate" x="1676" y="338">占形成商圈 20.54%</text>
+      <text class="transition-note" x="1004" y="552">有效交易对商户 → 能够形成商圈：66.58%</text>
+    </g>
+  
+    <g aria-label="交易量转化桑基图">
+      <text class="section-title" x="62" y="628">交易量转化流（单位：万笔）</text>
+      <path class="flow flow-transaction" d="M 88.0 742.0 C 215.9 742.0, 238.1 742.0, 366.0 742.0 L 366.0 776.5 C 238.1 776.5, 215.9 776.5, 88.0 776.5 Z"/>
+<path class="flow flow-loss" d="M 88.0 776.5 C 215.9 776.5, 238.1 900.0, 366.0 900.0 L 366.0 1045.5 C 238.1 1045.5, 215.9 922.0, 88.0 922.0 Z"/>
+<rect x="366.0" y="900.0" width="16" height="145.5" rx="5" fill="#CBD5E1"/>
+<path class="flow flow-transaction" d="M 382.0 742.0 C 509.9 742.0, 532.1 742.0, 660.0 742.0 L 660.0 767.0 C 532.1 767.0, 509.9 767.0, 382.0 767.0 Z"/>
+<path class="flow flow-loss" d="M 382.0 767.0 C 509.9 767.0, 532.1 900.0, 660.0 900.0 L 660.0 909.5 C 532.1 909.5, 509.9 776.5, 382.0 776.5 Z"/>
+<rect x="660.0" y="900.0" width="16" height="9.5" rx="5" fill="#CBD5E1"/>
+<path class="flow flow-transaction" d="M 676.0 742.0 C 803.9 742.0, 826.1 742.0, 954.0 742.0 L 954.0 750.9 C 826.1 750.9, 803.9 750.9, 676.0 750.9 Z"/>
+<path class="flow flow-loss" d="M 676.0 750.9 C 803.9 750.9, 826.1 900.0, 954.0 900.0 L 954.0 916.2 C 826.1 916.2, 803.9 767.0, 676.0 767.0 Z"/>
+<rect x="954.0" y="900.0" width="16" height="16.2" rx="5" fill="#CBD5E1"/>
+<path class="flow flow-transaction" d="M 970.0 742.0 C 1097.9 742.0, 1120.1 742.0, 1248.0 742.0 L 1248.0 746.8 C 1120.1 746.8, 1097.9 746.8, 970.0 746.8 Z"/>
+<path class="flow flow-loss" d="M 970.0 746.8 C 1097.9 746.8, 1120.1 900.0, 1248.0 900.0 L 1248.0 904.1 C 1120.1 904.1, 1097.9 750.9, 970.0 750.9 Z"/>
+<rect x="1248.0" y="900.0" width="16" height="4.1" rx="5" fill="#CBD5E1"/>
+<path class="flow flow-transaction" d="M 1264.0 742.0 C 1391.9 742.0, 1414.1 742.0, 1542.0 742.0 L 1542.0 746.1 C 1414.1 746.1, 1391.9 746.1, 1264.0 746.1 Z"/>
+<path class="flow flow-loss" d="M 1264.0 746.1 C 1391.9 746.1, 1414.1 900.0, 1542.0 900.0 L 1542.0 900.7 C 1414.1 900.7, 1391.9 746.8, 1264.0 746.8 Z"/>
+<rect x="1542.0" y="900.0" width="16" height="2.0" rx="5" fill="#CBD5E1"/>
+<rect x="72.0" y="742.0" width="16" height="180.0" rx="5" fill="#2563EB"/>
+<rect x="366.0" y="742.0" width="16" height="34.5" rx="5" fill="#3B82F6"/>
+<rect x="660.0" y="742.0" width="16" height="25.0" rx="5" fill="#65A30D"/>
+<rect x="954.0" y="742.0" width="16" height="8.9" rx="5" fill="#D97706"/>
+<rect x="1248.0" y="742.0" width="16" height="4.8" rx="5" fill="#DC2626"/>
+<rect x="1542.0" y="742.0" width="16" height="4.1" rx="5" fill="#BE123C"/>
+      <text class="node-title" x="80.0" y="671.0" text-anchor="middle">总交易量</text><text class="node-value" x="80.0" y="695.0" text-anchor="middle">16,300万</text><text class="node-rate" x="80.0" y="715.0" text-anchor="middle">占首阶段 100.00%</text>
+<text class="node-title" x="374.0" y="671.0" text-anchor="middle">线下交易</text><text class="node-value" x="374.0" y="695.0" text-anchor="middle">3,124万</text><text class="node-rate" x="374.0" y="715.0" text-anchor="middle">占首阶段 19.17%</text>
+<text class="node-title" x="668.0" y="671.0" text-anchor="middle">剔除个体户后可聚类交易</text><text class="node-value" x="668.0" y="695.0" text-anchor="middle">2,267万</text><text class="node-rate" x="668.0" y="715.0" text-anchor="middle">占首阶段 13.91%</text>
+<text class="node-title" x="962.0" y="671.0" text-anchor="middle">匹配商圈有效交易</text><text class="node-value" x="962.0" y="695.0" text-anchor="middle">803万</text><text class="node-rate" x="962.0" y="715.0" text-anchor="middle">占首阶段 4.93%</text>
+<text class="node-title" x="1256.0" y="671.0" text-anchor="middle">商圈交易筛选后</text><text class="node-value" x="1256.0" y="695.0" text-anchor="middle">434万</text><text class="node-rate" x="1256.0" y="715.0" text-anchor="middle">占首阶段 2.66%</text>
+<text class="node-title" x="1550.0" y="671.0" text-anchor="middle">最终商圈交易</text><text class="node-value" x="1550.0" y="695.0" text-anchor="middle">369万</text><text class="node-rate" x="1550.0" y="715.0" text-anchor="middle">占首阶段 2.26%</text>
+      <text class="loss-title" x="374.0" y="874.0" text-anchor="middle">线上等交易</text><text class="loss-value" x="374.0" y="896.0" text-anchor="middle">13,176万</text>
+<text class="loss-title" x="668.0" y="874.0" text-anchor="middle">个体户等交易</text><text class="loss-value" x="668.0" y="896.0" text-anchor="middle">857万</text>
+<text class="loss-title" x="962.0" y="874.0" text-anchor="middle">未匹配商圈交易</text><text class="loss-value" x="962.0" y="896.0" text-anchor="middle">1,464万</text>
+<text class="loss-title" x="1256.0" y="874.0" text-anchor="middle">商圈筛选流失</text><text class="loss-value" x="1256.0" y="896.0" text-anchor="middle">369万</text>
+<text class="loss-title" x="1550.0" y="874.0" text-anchor="middle">最终筛选流失</text><text class="loss-value" x="1550.0" y="896.0" text-anchor="middle">65万</text>
+    </g>
+  
+    <g aria-label="交易对证据桑基图">
+      <text class="section-title" x="62" y="1165">交易对证据流（单位：对）</text>
+      <path class="flow flow-pair-effective" d="M 88.0 1225.0 C 378.7 1225.0, 429.3 1225.0, 720.0 1225.0 L 720.0 1232.6 C 429.3 1232.6, 378.7 1232.6, 88.0 1232.6 Z"/>
+      <path class="flow flow-loss" d="M 88.0 1232.6 C 378.7 1232.6, 429.3 1260.0, 720.0 1260.0 L 720.0 1370.4 C 429.3 1370.4, 378.7 1343.0, 88.0 1343.0 Z"/>
+      <rect x="72.0" y="1225.0" width="16" height="118.0" rx="5" fill="#2563EB"/>
+      <rect x="720.0" y="1225.0" width="16" height="7.6" rx="5" fill="#7C3AED"/>
+      <rect x="720.0" y="1260.0" width="16" height="110.4" rx="5" fill="#CBD5E1"/>
+      <text class="node-title" x="80" y="1198" text-anchor="middle">有交易关联的交易对</text>
+      <text class="node-value" x="80" y="1222" text-anchor="middle">1,498,702</text>
+      <text class="node-title" x="748" y="1212">有效交易对</text>
+      <text class="node-value" x="748" y="1236">96,607</text>
+      <text class="node-rate" x="888" y="1236">有效率 6.45%</text>
+      <text class="loss-title" x="748" y="1288">未达 support≥2</text>
+      <text class="loss-value" x="748" y="1312">1,402,095</text>
+      <text class="node-rate" x="912" y="1312">占 93.55%</text>
+    </g>
+  <text class="scope-label" x="900" y="1443">有效口径：support ≥ 2，即至少 2 个不同 account_number 均消费过同一商户对</text>
+  <text class="scope-label" x="900" y="1469">形成商圈的 54,828 户 = 经纬度直接添加 43,569 户 + 交易对添加 11,259 户</text>
+</svg>

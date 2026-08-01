@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1328" height="700" viewBox="0 0 1328 700" role="img" aria-labelledby="chart-title chart-desc">
+  <title id="chart-title">上海1至6月线下交易对与聚类覆盖漏斗</title>
+  <desc id="chart-desc">分别展示交易对有效率、有效交易对商户覆盖率和聚类商户覆盖率。有效交易对支持度至少为2。</desc>
+  <defs>
+    <filter id="card-shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#16325C" flood-opacity="0.10"/>
+    </filter>
+    <linearGradient id="base-gradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#BFDBFE"/>
+      <stop offset="100%" stop-color="#93C5FD"/>
+    </linearGradient>
+    <linearGradient id="pair-gradient" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#3B82F6"/><stop offset="100%" stop-color="#2563EB"/></linearGradient><linearGradient id="merchant-gradient" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#8B5CF6"/><stop offset="100%" stop-color="#6D28D9"/></linearGradient><linearGradient id="cluster-gradient" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#14B8A6"/><stop offset="100%" stop-color="#0F766E"/></linearGradient>
+  </defs>
+  <style>
+    text {
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    }
+    .background { fill: #F4F7FC; }
+    .panel { fill: #FFFFFF; filter: url(#card-shadow); }
+    .main-title { fill: #102A43; font-size: 28px; font-weight: 700; text-anchor: middle; }
+    .subtitle { fill: #627D98; font-size: 15px; text-anchor: middle; }
+    .panel-title { fill: #243B53; font-size: 20px; font-weight: 700; text-anchor: middle; }
+    .stage-label { fill: #627D98; font-size: 14px; text-anchor: middle; }
+    .source-value { fill: #102A43; font-size: 25px; font-weight: 700; text-anchor: middle; }
+    .target-value { fill: #102A43; font-size: 23px; font-weight: 700; text-anchor: middle; }
+    .percent-label { fill: #829AB1; font-size: 13px; text-anchor: middle; }
+    .source-funnel { fill: url(#base-gradient); }
+    .rate-pill { fill: #E8F0FE; }
+    .rate-text { fill: #1D4ED8; font-size: 14px; font-weight: 700; text-anchor: middle; }
+    .reduction-label { fill: #829AB1; font-size: 12px; text-anchor: middle; }
+    .scope-label { fill: #486581; font-size: 14px; text-anchor: middle; }
+  </style>
+  <rect class="background" width="1328" height="700" rx="24"/>
+  <text class="main-title" x="664" y="48">上海1–6月线下交易对与聚类覆盖漏斗</text>
+  <text class="subtitle" x="664" y="78">交易对与商户采用并列口径，避免混用不同单位和非嵌套集合</text>
+  
+    <g aria-label="交易对有效率">
+      <rect class="panel" x="28" y="112" width="400" height="500" rx="20"/>
+      <text class="panel-title" x="228.0" y="154">交易对有效率</text>
+      <text class="stage-label" x="228.0" y="190">有交易关联的交易对</text>
+      <text class="source-value" x="228.0" y="220">1,498,702 对</text>
+      <text class="percent-label" x="228.0" y="246">100.00%</text>
+
+      <path class="source-funnel" d="M 62 270 L 394 270 L 304 386 L 152 386 Z"/>
+      <path class="target-funnel" fill="url(#pair-gradient)"
+            d="M 220.0 398 L 236.0 398
+               L 232.0 486 L 224.0 486 Z"/>
+
+      <text class="stage-label" x="228.0" y="520">有效交易对</text>
+      <text class="target-value" x="228.0" y="550">96,607 对</text>
+      <rect class="rate-pill" x="171.0" y="565" width="114" height="28" rx="14"/>
+      <text class="rate-text" x="228.0" y="585">6.45%</text>
+      <text class="reduction-label" x="228.0" y="605">减少 1,402,095 对 · 93.55%</text>
+    </g>
+    <g aria-label="有效交易对商户覆盖">
+      <rect class="panel" x="452" y="112" width="400" height="500" rx="20"/>
+      <text class="panel-title" x="652.0" y="154">有效交易对商户覆盖</text>
+      <text class="stage-label" x="652.0" y="190">形成交易对的商户</text>
+      <text class="source-value" x="652.0" y="220">461,097 户</text>
+      <text class="percent-label" x="652.0" y="246">100.00%</text>
+
+      <path class="source-funnel" d="M 486 270 L 818 270 L 728 386 L 576 386 Z"/>
+      <path class="target-funnel" fill="url(#merchant-gradient)"
+            d="M 638.4 398 L 665.6 398
+               L 657.2 486 L 646.8 486 Z"/>
+
+      <text class="stage-label" x="652.0" y="520">有效交易对涉及商户</text>
+      <text class="target-value" x="652.0" y="550">82,345 户</text>
+      <rect class="rate-pill" x="595.0" y="565" width="114" height="28" rx="14"/>
+      <text class="rate-text" x="652.0" y="585">17.86%</text>
+      <text class="reduction-label" x="652.0" y="605">减少 378,752 户 · 82.14%</text>
+    </g>
+    <g aria-label="聚类商户覆盖">
+      <rect class="panel" x="876" y="112" width="400" height="500" rx="20"/>
+      <text class="panel-title" x="1076.0" y="154">聚类商户覆盖</text>
+      <text class="stage-label" x="1076.0" y="190">形成交易对的商户</text>
+      <text class="source-value" x="1076.0" y="220">461,097 户</text>
+      <text class="percent-label" x="1076.0" y="246">100.00%</text>
+
+      <path class="source-funnel" d="M 910 270 L 1242 270 L 1152 386 L 1000 386 Z"/>
+      <path class="target-funnel" fill="url(#cluster-gradient)"
+            d="M 1067.3 398 L 1084.7 398
+               L 1080.0 486 L 1072.0 486 Z"/>
+
+      <text class="stage-label" x="1076.0" y="520">有商圈 ID 的交易对商户</text>
+      <text class="target-value" x="1076.0" y="550">52,929 户</text>
+      <rect class="rate-pill" x="1019.0" y="565" width="114" height="28" rx="14"/>
+      <text class="rate-text" x="1076.0" y="585">11.48%</text>
+      <text class="reduction-label" x="1076.0" y="605">减少 408,168 户 · 88.52%</text>
+    </g>
+  <text class="scope-label" x="664" y="662">有效交易对口径：support ≥ 2，即至少 2 个不同 account_number 均消费过该商户对</text>
+</svg>

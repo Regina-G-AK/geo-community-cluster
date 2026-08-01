@@ -32,6 +32,18 @@ python scripts/send_attachment_email_task.py
 python merchant_pair_coverage_task.py
 ```
 
+可以使用项目根目录的 `draw_merchant_pair_funnel.py`，根据交易对统计结果生成三组并列口径的 SVG 漏斗图：交易对有效率、有效交易对商户覆盖率和聚类商户覆盖率。脚本使用 Python 标准库，不需要安装绘图库；指标和 `support` 门槛在脚本顶部显式配置，输出文件为项目根目录的 `merchant_pair_funnel.svg`。
+
+```powershell
+python draw_merchant_pair_funnel.py
+```
+
+可以使用 `scripts/draw_merchant_pair_sankey.py` 生成上海 1—6 月商户聚类全流程桑基图。商户主链路展示“上海总商户 → 线下商户 → 线下非个体户 → 能形成交易对的商户 → 有效交易对商户 → 能够形成商圈的商户”，并将能够形成商圈的商户拆分为经纬度直接添加和交易对添加；交易量链路展示总交易、线下交易、剔除个体户后的可聚类交易、匹配商圈有效交易和后续筛选结果；交易对数量因单位不同，使用独立桑基流。输出文件为 `scripts/merchant_pair_sankey.svg`。
+
+```powershell
+python scripts/draw_merchant_pair_sankey.py
+```
+
 任务严格按 `check()`、`taskrun()`、`destroy()`、`finish_task()` 顺序执行：`check()` 先完成平台挂载，再校验表名、分区、输出目录和邮箱；`taskrun()` 依次读表、拒绝空结果、写出并校验 Excel、发送邮件，读表和发信失败时均按 `maximum_attempts` 和 `retry_delay_seconds` 重试，最终失败会保留原始异常；`destroy()` 只记录清理结果，不删除生成的 Excel；无论挂载、读表、写文件或发送是否成功，最外层都会调用 `finish_task()` 完成平台收尾。
 
 项目不包含运行资源监测逻辑，不会启动 `tracemalloc` 或读取 `/proc/self/status`。
