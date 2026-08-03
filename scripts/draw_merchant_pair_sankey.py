@@ -18,8 +18,8 @@ class SankeyInput(NamedTuple):
     offline_transaction_count: int
     non_individual_transaction_count: int
     matched_circle_transaction_count: int
-    filtered_circle_transaction_count: int
-    final_circle_transaction_count: int
+    non_dianping_transaction_count: int
+    dianping_transaction_count: int
     pair_count: int
     effective_pair_count: int
     support_threshold: int
@@ -42,8 +42,8 @@ class SankeyIndicators(NamedTuple):
     offline_transaction_pct: float
     non_individual_transaction_pct: float
     matched_circle_transaction_pct: float
-    filtered_circle_transaction_pct: float
-    final_circle_transaction_pct: float
+    non_dianping_transaction_pct: float
+    dianping_transaction_pct: float
     ineffective_pair_count: int
     effective_pair_pct: float
 
@@ -62,8 +62,8 @@ DATA = SankeyInput(
     offline_transaction_count=31_240_000,
     non_individual_transaction_count=22_670_000,
     matched_circle_transaction_count=8_030_000,
-    filtered_circle_transaction_count=4_340_000,
-    final_circle_transaction_count=3_690_000,
+    non_dianping_transaction_count=4_340_000,
+    dianping_transaction_count=3_690_000,
     pair_count=1_498_702,
     effective_pair_count=96_607,
     support_threshold=2,
@@ -109,11 +109,34 @@ def calculate_indicators(data: SankeyInput) -> SankeyIndicators:
         data.offline_transaction_count,
         data.non_individual_transaction_count,
         data.matched_circle_transaction_count,
-        data.filtered_circle_transaction_count,
-        data.final_circle_transaction_count,
     )
     validate_nested_counts("商户桑基流", merchant_counts)
     validate_nested_counts("交易桑基流", transaction_counts)
+
+    if data.matched_circle_transaction_count <= 0:
+        raise ValueError(
+            "匹配商圈有效交易数量必须大于 0: "
+            f"matched_circle_transaction_count="
+            f"{data.matched_circle_transaction_count}"
+        )
+    if (
+        data.non_dianping_transaction_count < 0
+        or data.dianping_transaction_count < 0
+        or (
+            data.non_dianping_transaction_count
+            + data.dianping_transaction_count
+            != data.matched_circle_transaction_count
+        )
+    ):
+        raise ValueError(
+            "匹配商圈有效交易必须完整拆分为非点评商圈交易和点评商圈交易: "
+            f"matched_circle_transaction_count="
+            f"{data.matched_circle_transaction_count}, "
+            f"non_dianping_transaction_count="
+            f"{data.non_dianping_transaction_count}, "
+            f"dianping_transaction_count="
+            f"{data.dianping_transaction_count}"
+        )
 
     if (
         data.geographic_assigned_merchant_count < 0
@@ -223,15 +246,15 @@ def calculate_indicators(data: SankeyInput) -> SankeyIndicators:
             * data.matched_circle_transaction_count
             / data.total_transaction_count
         ),
-        filtered_circle_transaction_pct=(
+        non_dianping_transaction_pct=(
             100.0
-            * data.filtered_circle_transaction_count
-            / data.total_transaction_count
+            * data.non_dianping_transaction_count
+            / data.matched_circle_transaction_count
         ),
-        final_circle_transaction_pct=(
+        dianping_transaction_pct=(
             100.0
-            * data.final_circle_transaction_count
-            / data.total_transaction_count
+            * data.dianping_transaction_count
+            / data.matched_circle_transaction_count
         ),
         ineffective_pair_count=data.pair_count - data.effective_pair_count,
         effective_pair_pct=(
@@ -549,17 +572,13 @@ def build_transaction_sankey(
         data.offline_transaction_count,
         data.non_individual_transaction_count,
         data.matched_circle_transaction_count,
-        data.filtered_circle_transaction_count,
-        data.final_circle_transaction_count,
     )
-    x_positions = (72.0, 366.0, 660.0, 954.0, 1248.0, 1542.0)
+    x_positions = (72.0, 366.0, 660.0, 954.0)
     node_colors = (
         "#2563EB",
         "#3B82F6",
         "#65A30D",
         "#D97706",
-        "#DC2626",
-        "#BE123C",
     )
     main_y = 742.0
     shapes = build_chain_shapes(
@@ -576,16 +595,12 @@ def build_transaction_sankey(
         "线下交易",
         "剔除个体户后可聚类交易",
         "匹配商圈有效交易",
-        "商圈交易筛选后",
-        "最终商圈交易",
     )
     rates = (
         100.0,
         indicators.offline_transaction_pct,
         indicators.non_individual_transaction_pct,
         indicators.matched_circle_transaction_pct,
-        indicators.filtered_circle_transaction_pct,
-        indicators.final_circle_transaction_pct,
     )
     stage_labels = "\n".join(
         build_stage_label(
@@ -606,8 +621,6 @@ def build_transaction_sankey(
         "线上等交易",
         "个体户等交易",
         "未匹配商圈交易",
-        "商圈筛选流失",
-        "最终筛选流失",
     )
     loss_counts = tuple(
         current_count - next_count
@@ -626,12 +639,49 @@ def build_transaction_sankey(
             loss_counts,
         )
     )
+
+    scale = 180.0 / data.total_transaction_count
+    matched_height = data.matched_circle_transaction_count * scale
+    non_dianping_height = (
+        data.non_dianping_transaction_count * scale
+    )
+    dianping_height = data.dianping_transaction_count * scale
+    branch_x = 1450.0
+    non_dianping_y = main_y
+    dianping_y = 825.0
+    non_dianping_path = build_band_path(
+        x_positions[-1] + 16.0,
+        branch_x,
+        main_y,
+        main_y + non_dianping_height,
+        non_dianping_y,
+        non_dianping_y + non_dianping_height,
+    )
+    dianping_path = build_band_path(
+        x_positions[-1] + 16.0,
+        branch_x,
+        main_y + non_dianping_height,
+        main_y + matched_height,
+        dianping_y,
+        dianping_y + dianping_height,
+    )
+
     return f"""
     <g aria-label="交易量转化桑基图">
       <text class="section-title" x="62" y="628">交易量转化流（单位：万笔）</text>
       {shapes}
       {stage_labels}
       {loss_labels}
+      <path class="flow flow-transaction" d="{non_dianping_path}"/>
+      <path class="flow flow-pair-assigned" d="{dianping_path}"/>
+      {build_node(branch_x, non_dianping_y, non_dianping_height, "#DC2626")}
+      {build_node(branch_x, dianping_y, dianping_height, "#BE123C")}
+      <text class="node-title" x="1478" y="730">非点评商圈交易</text>
+      <text class="node-value" x="1478" y="754">{format_wan(data.non_dianping_transaction_count)}</text>
+      <text class="node-rate" x="1478" y="774">占匹配商圈 {indicators.non_dianping_transaction_pct:.2f}%</text>
+      <text class="node-title" x="1478" y="813">点评商圈交易</text>
+      <text class="node-value pink-value" x="1478" y="837">{format_wan(data.dianping_transaction_count)}</text>
+      <text class="node-rate" x="1478" y="857">占匹配商圈 {indicators.dianping_transaction_pct:.2f}%</text>
     </g>"""
 
 
@@ -729,9 +779,9 @@ def build_svg(data: SankeyInput) -> str:
   <rect class="surface" x="24" y="1124" width="1752" height="276" rx="22"/>
   <text class="main-title" x="900" y="45">上海1—6月线下交易商户商圈聚类全流程桑基图</text>
   <text class="subtitle" x="900" y="76">商户、交易量与交易对采用独立单位和独立宽度比例</text>
-  {merchant_sankey}
-  {transaction_sankey}
-  {pair_sankey}
+{merchant_sankey}
+{transaction_sankey}
+{pair_sankey}
   <text class="scope-label" x="900" y="1443">有效口径：support ≥ {data.support_threshold}，即至少 {data.support_threshold} 个不同 account_number 均消费过同一商户对</text>
   <text class="scope-label" x="900" y="1469">形成商圈的 54,828 户 = 经纬度直接添加 43,569 户 + 交易对添加 11,259 户</text>
 </svg>
@@ -742,7 +792,8 @@ def write_svg(
     svg: str,
     output_path: Path,
 ) -> None:
-    output_path.write_text(svg, encoding="utf-8")
+    with output_path.open("w", encoding="utf-8", newline="\n") as output:
+        output.write(svg)
 
 
 def main() -> None:

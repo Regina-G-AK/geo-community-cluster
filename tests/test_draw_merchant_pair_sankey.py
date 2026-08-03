@@ -43,6 +43,11 @@ def test_calculate_indicators_preserves_sankey_flows() -> None:
         == DATA.circle_capable_merchant_count
     )
     assert (
+        DATA.non_dianping_transaction_count
+        + DATA.dianping_transaction_count
+        == DATA.matched_circle_transaction_count
+    )
+    assert (
         DATA.effective_pair_count
         + indicators.ineffective_pair_count
         == DATA.pair_count
@@ -82,12 +87,12 @@ def test_calculate_indicators_matches_expected_rates() -> None:
         == pytest.approx(4.926_380)
     )
     assert (
-        indicators.filtered_circle_transaction_pct
-        == pytest.approx(2.662_577)
+        indicators.non_dianping_transaction_pct
+        == pytest.approx(54.047_323)
     )
     assert (
-        indicators.final_circle_transaction_pct
-        == pytest.approx(2.263_804)
+        indicators.dianping_transaction_pct
+        == pytest.approx(45.952_677)
     )
     assert indicators.effective_pair_pct == pytest.approx(6.446_045)
 
@@ -128,12 +133,36 @@ def test_calculate_indicators_rejects_non_nested_transaction_counts() -> None:
         offline_transaction_count=80,
         non_individual_transaction_count=90,
         matched_circle_transaction_count=50,
-        filtered_circle_transaction_count=40,
-        final_circle_transaction_count=30,
+        non_dianping_transaction_count=30,
+        dianping_transaction_count=20,
         pair_count=50,
         effective_pair_count=10,
         support_threshold=2,
     )
 
     with pytest.raises(ValueError, match="交易桑基流各阶段数量必须依次不增加"):
+        calculate_indicators(data)
+
+
+def test_calculate_indicators_rejects_incomplete_transaction_split() -> None:
+    data = DATA._replace(dianping_transaction_count=3_680_000)
+
+    with pytest.raises(
+        ValueError,
+        match="匹配商圈有效交易必须完整拆分",
+    ):
+        calculate_indicators(data)
+
+
+def test_calculate_indicators_rejects_empty_transaction_split() -> None:
+    data = DATA._replace(
+        matched_circle_transaction_count=0,
+        non_dianping_transaction_count=0,
+        dianping_transaction_count=0,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="匹配商圈有效交易数量必须大于 0",
+    ):
         calculate_indicators(data)
