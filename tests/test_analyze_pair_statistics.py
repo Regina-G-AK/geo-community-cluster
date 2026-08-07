@@ -43,7 +43,7 @@ def _script_environment(directory: Path) -> dict[str, str]:
 def test_analyze_pair_statistics_script_runs_platform_lifecycle_and_prints_report(
     tmp_path: Path,
 ) -> None:
-    pair_directory = tmp_path / "algorithm_one_output"
+    pair_directory = tmp_path / "code"
     pair_directory.mkdir()
     input_path = pair_directory / "pair_statistics_shanghai.pkl"
     statistics = PairStatistics(
@@ -114,7 +114,7 @@ def test_analyze_pair_statistics_script_runs_platform_lifecycle_and_prints_repor
 def test_analyze_pair_statistics_script_finishes_task_after_analysis_failure(
     tmp_path: Path,
 ) -> None:
-    pair_directory = tmp_path / "algorithm_one_output"
+    pair_directory = tmp_path / "code"
     pair_directory.mkdir()
     (pair_directory / "pair_statistics_shanghai.pkl").write_bytes(b"invalid")
     _write_platform_stub(tmp_path)

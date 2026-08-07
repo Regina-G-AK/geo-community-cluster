@@ -5,6 +5,7 @@ import pickle
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from typing import Iterator
 
 import networkx as nx
 import pandas as pd
@@ -31,6 +32,11 @@ from business_district.graph import (
     _calculate_sppmi_candidates,
     build_pair_statistics,
     build_sparse_graph,
+    iter_pair_statistics_updates,
+)
+from business_district.intermediate import (
+    read_pair_statistics,
+    write_pair_statistics_updates,
 )
 from business_district.pipeline import (
     run_algorithm_one_from_transactions,
@@ -179,8 +185,46 @@ def test_pair_statistics_multiprocessing_matches_serial_result() -> None:
 
     serial = build_pair_statistics(visits, config, 1)
     parallel = build_pair_statistics(visits, config, 2)
+    updates = list(iter_pair_statistics_updates(visits, config, 1))
 
     assert parallel == serial
+    assert len(updates) == 2
+    assert updates[0].supports == {("a", "b"): 1}
+    assert updates[-1] == serial
+
+
+def test_pair_statistics_updates_overwrite_previous_snapshot(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "pair_statistics_test.pkl"
+    first = PairStatistics(
+        strengths={("a", "b"): 1.0},
+        supports={("a", "b"): 1},
+        merchant_visit_counts={"a": 1, "b": 1},
+    )
+    second = PairStatistics(
+        strengths={("a", "b"): 2.0, ("b", "c"): 1.0},
+        supports={("a", "b"): 2, ("b", "c"): 1},
+        merchant_visit_counts={"a": 2, "b": 3, "c": 1},
+    )
+
+    def build_updates() -> Iterator[PairStatistics]:
+        yield first
+        assert read_pair_statistics(output_path) == first
+        yield second
+
+    saved = write_pair_statistics_updates(build_updates(), output_path)
+
+    assert saved == second
+    assert read_pair_statistics(output_path) == second
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "pair_statistics_test.pkl"
+    ]
+    assert capsys.readouterr().out.splitlines() == [
+        "边=1，点=2",
+        "边=2，点=3",
+    ]
 
 
 def test_load_transactions_rejects_duplicate_flow_number(tmp_path: Path) -> None:

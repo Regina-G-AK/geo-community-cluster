@@ -29,7 +29,7 @@ from typing import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-INPUT_PATH = PROJECT_ROOT / "algorithm_one_output" / "pair_statistics_shanghai.pkl"
+INPUT_PATH = PROJECT_ROOT / "code" / "pair_statistics_shanghai.pkl"
 MINIMUM_SUPPORT = 3
 CONTEXT_SMOOTHING_ALPHA = 0.75
 SPPMI_SHIFT = 3.0

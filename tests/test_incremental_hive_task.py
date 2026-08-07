@@ -657,7 +657,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
     )
     fake_sd = _FakeTaskSd(parameter_data, source_data)
     monkeypatch.setattr(hive_task, "sd", fake_sd)
-    output_directory = tmp_path / "algorithm_one_output"
+    output_directory = tmp_path / "code"
     output_directory.mkdir()
     with (output_directory / "pair_statistics_shanghai.pkl").open("wb") as file:
         pickle.dump(

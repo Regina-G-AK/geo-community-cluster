@@ -5,7 +5,7 @@ import multiprocessing
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Counter as CounterType
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 import networkx as nx
 import pandas as pd
@@ -84,19 +84,54 @@ def _partition_card_groups(
     return tuple(groups[index::chunk_count] for index in range(chunk_count))
 
 
-def _merge_pair_statistics_chunks(
-    chunks: List[PairStatistics],
-) -> PairStatistics:
+def _iter_pair_statistics_chunks(
+    tasks: List[PairStatisticsTask],
+    process_count: int,
+) -> Iterator[PairStatistics]:
+    if process_count == 1 or len(tasks) <= 1:
+        for task in tasks:
+            yield _build_pair_statistics_chunk(task)
+        return
+
+    with multiprocessing.Pool(processes=process_count) as pool:
+        for chunk in pool.imap(_build_pair_statistics_chunk, tasks):
+            yield chunk
+
+
+def _accumulate_pair_statistics_chunks(
+    chunks: Iterable[PairStatistics],
+) -> Iterator[PairStatistics]:
     strengths: Dict[MerchantPair, float] = defaultdict(float)
     supports: Dict[MerchantPair, int] = defaultdict(int)
     visit_counts: CounterType[str] = Counter()
+    has_chunk = False
     for chunk in chunks:
+        has_chunk = True
         for pair, strength in chunk.strengths.items():
             strengths[pair] += strength
         for pair, support in chunk.supports.items():
             supports[pair] += support
         visit_counts.update(chunk.merchant_visit_counts)
-    return PairStatistics(dict(strengths), dict(supports), dict(visit_counts))
+        yield PairStatistics(
+            dict(strengths),
+            dict(supports),
+            dict(visit_counts),
+        )
+    if not has_chunk:
+        yield PairStatistics({}, {}, {})
+
+
+def iter_pair_statistics_updates(
+    visits: pd.DataFrame,
+    config: CooccurrenceConfig,
+    process_count: int,
+) -> Iterator[PairStatistics]:
+    if process_count < 1:
+        raise ValueError(f"进程数必须不小于 1: process_count={process_count}")
+    partitions = _partition_card_groups(visits, process_count)
+    tasks = [(partition, config) for partition in partitions]
+    chunks = _iter_pair_statistics_chunks(tasks, process_count)
+    yield from _accumulate_pair_statistics_chunks(chunks)
 
 
 def build_pair_statistics(
@@ -104,16 +139,15 @@ def build_pair_statistics(
     config: CooccurrenceConfig,
     process_count: int,
 ) -> PairStatistics:
-    if process_count < 1:
-        raise ValueError(f"进程数必须不小于 1: process_count={process_count}")
-    partitions = _partition_card_groups(visits, process_count)
-    tasks = [(partition, config) for partition in partitions]
-    if process_count == 1 or len(tasks) <= 1:
-        chunks = [_build_pair_statistics_chunk(task) for task in tasks]
-    else:
-        with multiprocessing.Pool(processes=process_count) as pool:
-            chunks = pool.map(_build_pair_statistics_chunk, tasks)
-    return _merge_pair_statistics_chunks(chunks)
+    updates = iter_pair_statistics_updates(
+        visits,
+        config,
+        process_count,
+    )
+    statistics = next(updates)
+    for statistics in updates:
+        pass
+    return statistics
 
 
 def _calculate_sppmi_candidates(

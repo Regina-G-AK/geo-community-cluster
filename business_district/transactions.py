@@ -322,7 +322,7 @@ def load_hive_transactions(
     # print_dataframe_probe("Hive坐标解析完成", selected)
     selected = keep_first_hive_flow_number_rows(selected)
 
-    print_probe("Hive交易时间解析开始", f"row_count={len(selected)}")
+    # print_probe("Hive交易时间解析开始", f"row_count={len(selected)}")
     parsed_timestamps = _parse_timestamps(
         selected[RAW_TIMESTAMP],
         timestamp_formats,

@@ -23,6 +23,7 @@ from business_district.intermediate import (
     build_pair_statistics_path,
     write_pair_statistics,
 )
+from business_district.probes import print_probe
 from business_district.results import (
     build_business_results,
     build_community_results,
@@ -70,6 +71,7 @@ def run_algorithm_one_from_transactions(
     merchant_coordinates = build_merchant_coordinates(prepared_transactions)
     merchant_metadata = build_merchant_metadata(prepared_transactions)
     visits = merge_visits(prepared_transactions, config.visits)
+    # 逐步更新暂时停用，完整计算后一次性写入
     statistics: PairStatistics = build_pair_statistics(
         visits,
         config.cooccurrence,
@@ -88,6 +90,7 @@ def run_algorithm_one_from_transactions(
         transaction_graph,
         geographic_preparation.seed_pairs,
     )
+    print_probe("g", "")
     chain_visit_count_threshold = calculate_chain_visit_count_threshold(
         list(statistics.merchant_visit_counts.values()),
         config.anchors,

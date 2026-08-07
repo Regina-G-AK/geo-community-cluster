@@ -26,6 +26,10 @@ from business_district.hive_task import (
     TaskMain as InitialTaskMain,
     load_hive_algorithm_parameters,
 )
+from business_district.memory_monitor import (
+    create_process_memory_monitor,
+    format_memory_report,
+)
 from incremental_assignment.hive_task import (
     HiveTaskConfig as IncrementalHiveTaskConfig,
     HiveTaskSummary as IncrementalHiveTaskSummary,
@@ -36,6 +40,7 @@ from incremental_assignment.models import AssignmentConfig
 TimestampFormats = Tuple[str, ...]
 HiveTask = Union[InitialTaskMain, IncrementalTaskMain]
 HiveTaskSummary = Union[InitialHiveTaskSummary, IncrementalHiveTaskSummary]
+MEMORY_SAMPLE_INTERVAL_SECONDS = 0.2
 
 
 def build_timestamp_formats() -> TimestampFormats:
@@ -99,7 +104,7 @@ def build_algorithm_config(
             chain_visit_count_quantile=0.9,
             chain_minimum_visit_count=100,
         ),
-        output=OutputConfig(directory=project_root / "algorithm_one_output"),
+        output=OutputConfig(directory=project_root / "code"),
         runtime=RuntimeConfig(process_count=4),
     )
 
@@ -168,18 +173,26 @@ def load_task_mode(initial_task_config: InitialHiveTaskConfig) -> Tuple[str, boo
 
 
 def run_task(task: HiveTask) -> HiveTaskSummary:
+    memory_monitor = create_process_memory_monitor(
+        MEMORY_SAMPLE_INTERVAL_SECONDS,
+    )
+    memory_monitor.start()
     try:
-        task.check()
-        summary = task.taskrun()
+        try:
+            task.check()
+            summary = task.taskrun()
+        finally:
+            task.destroy()
+            taskfinish.finish_task()
     finally:
-        task.destroy()
-        taskfinish.finish_task()
+        memory_report = memory_monitor.stop()
+        print(format_memory_report(memory_report), flush=True)
 
     return summary
 
 
 def main() -> None:
-    project_root = Path(__file__).resolve().parent
+    project_root = Path("/app/project/fid_bg_icmp")
     timestamp_formats = build_timestamp_formats()
     visit_config = build_visit_config()
     graph_config = build_graph_config()

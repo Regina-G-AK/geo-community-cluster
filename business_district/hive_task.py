@@ -919,6 +919,7 @@ class TaskMain:
                 target_output,
                 cross_region_output,
             )
+            print_probe("o", "")
             if target_output.empty:
                 raise TransactionDataError(
                     "参数匹配交易中没有可输出的分类 1、2 商户: "
@@ -933,6 +934,7 @@ class TaskMain:
                 self.task_config.target_temp_table,
                 self.dt_var,
             )
+            print_probe("t", "")
             logrecord.log_data(
                 f"taskrun seconds={time.time() - total_start:.2f}, "
                 f"output_rows={len(target_output)}, "

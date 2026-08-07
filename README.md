@@ -6,11 +6,11 @@
 
 项目运行环境固定为 Python 3.7.1 至 3.7.x，依赖版本以 `pyproject.toml` 为准。
 
-本项目不再读取 INI、TOML 等配置文件，也不提供带默认参数的命令行任务入口。初始化聚类和增量归属统一通过项目根目录的 `run_hive_business_district.py` 配置和运行；城市、输入格式、图算法、社区算法、地理参数、锚点、输出目录、增量归属及工作进程数均在入口中显式构造。
+本项目不再读取 INI、TOML 等配置文件，也不提供带默认参数的命令行任务入口。初始化聚类和增量归属统一通过项目根目录的 `run_hive_business_district.py` 配置；可以直接执行该 Python 文件，也可以在同目录的 `run_hive_business_district.ipynb` 中运行全部单元。Notebook 直接调用 Python 入口的 `main()`，两种入口使用完全相同的配置和执行逻辑。城市、输入格式、图算法、社区算法、地理参数、锚点、输出目录、增量归属及工作进程数均在 Python 入口中显式构造。
 
 `RuntimeConfig.process_count` 配置工作进程数，必须是不小于 `1` 的整数；主入口当前使用 `4`。初始化聚类会按卡号分片并行计算商户对统计，增量归属会按候选商户分片并行计算图与地理评分。设置为 `1` 时使用相同的串行计算逻辑，适合小数据量运行。
 
-每次运行会直接在 `[output].directory` 下写入 `pair_statistics_{region}.pkl` 商户对中间文件，其中 `region` 使用 `[city].code`。文件使用 Python pickle protocol 4，顶层对象为 `business_district.graph.PairStatistics`，包含以有序商户二元组为键的 `strengths`、同键的 `supports`，以及以商户 ID 为键的 `merchant_visit_counts`；该格式可由项目要求的 Python 3.7 读取。
+每次运行会在全部商户对统计计算完成后，直接向项目根目录 `code` 文件夹下的 `pair_statistics_{region}.pkl` 写入商户对中间数据，不使用 `.tmp` 临时文件，其中 `region` 使用 `[city].code`。文件使用 Python pickle protocol 4，顶层对象为 `business_district.graph.PairStatistics`，包含以有序商户二元组为键的 `strengths`、同键的 `supports`，以及以商户 ID 为键的 `merchant_visit_counts`；该格式可由项目要求的 Python 3.7 读取。
 
 可以使用独立诊断脚本分析该中间文件。分析逻辑只依赖 Python 标准库，不导入项目业务模块；任务入口使用线上环境提供的 `spdbccc_data` 执行挂载检查、运行、销毁和 `finish_task()` 收尾。脚本会复算最小支持人数、SPPMI、z-score、互为 top-k 和访问量型连锁商户删除等阶段，并直接打印总体摘要、分布、连通分量和重点商户指标。由于中间文件不包含商户分类和坐标，脚本不能复算分类 `2` 商户删除、地理种子边和疑似线上商户识别。pickle 文件只应来自可信任务输出。
 
@@ -18,7 +18,13 @@
 python scripts/analyze_pair_statistics.py
 ```
 
-输入路径、图参数、访问量型商户阈值和重点商户输出数量集中定义在 `scripts/analyze_pair_statistics.py` 顶部；默认基于脚本位置读取项目根目录下的 `algorithm_one_output/pair_statistics_shanghai.pkl`，不受任务启动工作目录影响。打印的 JSON 统计覆盖全部商户，每类重点商户默认展示前 `50` 名。分析时直接校验中间文件中的原始字典，只为重点商户生成明细，孤立商户使用计数参与分布统计，避免大规模数据下复制全部商户和商户对。
+可以使用 `scripts/inspect_transaction_graph_task.py` 把项目根目录下的 `code/pair_statistics_shanghai.pkl` 复制为项目根目录的 `pair_statistics_shanghai.pkl`，再读取根目录副本并打印其绝对路径、边数和点数。边数取 `strengths` 的商户对数量，点数取 `merchant_visit_counts` 的商户数量；脚本遵循线上 task 的挂载、检查、运行、销毁和 `finish_task()` 生命周期。
+
+```powershell
+python scripts/inspect_transaction_graph_task.py
+```
+
+输入路径、图参数、访问量型商户阈值和重点商户输出数量集中定义在 `scripts/analyze_pair_statistics.py` 顶部；默认基于脚本位置读取项目根目录下的 `code/pair_statistics_shanghai.pkl`，不受任务启动工作目录影响。打印的 JSON 统计覆盖全部商户，每类重点商户默认展示前 `50` 名。分析时直接校验中间文件中的原始字典，只为重点商户生成明细，孤立商户使用计数参与分布统计，避免大规模数据下复制全部商户和商户对。
 
 可以使用独立附件邮件任务读取 Hive 结果表、写出 Excel 文件并发送附件。`scripts/send_attachment_email_task.py` 顶部的 `CONFIG` 当前从 `dev_icamp.icamp_merchant_cluster_algo_output` 读取 `dt=20260720`，只保留 `community_id` 非空且不等于空字符串的行，并写入 `/appdata/project/fid_bg_icmp/community_output.xlsx`。读表使用 `spdbccc_data.read_table("dev_icamp.icamp_merchant_cluster_algo_output", dt=["20260720"])` 的完整表名形式，不再单独传入 `db_name`；运行前应核对分区日期、文件名、收件人和抄送人。
 
@@ -46,7 +52,7 @@ python scripts/draw_merchant_pair_sankey.py
 
 任务严格按 `check()`、`taskrun()`、`destroy()`、`finish_task()` 顺序执行：`check()` 先完成平台挂载，再校验表名、分区、输出目录和邮箱；`taskrun()` 依次读表、拒绝空结果、写出并校验 Excel、发送邮件，读表和发信失败时均按 `maximum_attempts` 和 `retry_delay_seconds` 重试，最终失败会保留原始异常；`destroy()` 只记录清理结果，不删除生成的 Excel；无论挂载、读表、写文件或发送是否成功，最外层都会调用 `finish_task()` 完成平台收尾。
 
-项目不包含运行资源监测逻辑，不会启动 `tracemalloc` 或读取 `/proc/self/status`。
+两个等价入口都会从 `check()` 开始到 `destroy()` 和 `finish_task()` 结束，每 `0.2` 秒采样一次 RSS 内存，并在任务结束或失败时输出一行 `[memory]` 报告。报告包含采样范围、运行时长、采样次数、峰值 `peak_rss_mib`、采样均值 `mean_rss_mib`，以及首次观察到峰值时主线程所在的文件、行号和函数 `peak_location`。Linux 会合计主进程及当前仍存活的全部后代进程，Windows 统计主进程；RSS 包含 Python 及 Pandas、NumPy 等本地库实际驻留的内存。峰值位置来自周期采样时的执行栈，用于定位高内存阶段，不表示该行独自分配了全部峰值内存。
 
 Hive 任务通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再根据参数表中的 `start_date`、`end_date` 计算输入分区：起止日期相同时直接读取该日分区，例如 `start_date=end_date=20260115` 时读取 `dt=20260115`；起止日期不同时读取时间范围所涉及月份的月底分区，例如范围跨越 2026 年 1 月和 2 月时读取 `dt=20260131`、`dt=20260228`。初始化任务和增量归属任务先按参数表 `region` 关联交易，再使用分行—城市关系筛选 `storename`：不含“市”的名称保留；含“市”的名称必须包含该分行允许的城市，例如上海仅允许“上海市”，兰州允许“兰州市”或“酒泉市”。未配置分行—城市关系的 `region` 会明确报错。被城市规则排除的分类 `1`、`2` 商户不参与聚类，但仍写入最终结果，`community_id` 留空，状态使用 `suspect_cross_region` 并通过 `status_codes` 转换为 `is_abnormal=5`；同一商户若另有符合规则的交易，则以正常聚类结果为准。任务不再判断 `transaction_time` 是否位于 `start_date` 和 `end_date` 之间。交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供，其余静态算法参数由主入口提供。初始化任务会读取 `business_district`：已有非空 ID 不限制格式，同一商户不得对应多个已有 ID；已有商户原样保留该 ID，其他商户先按增量归属规则尝试加入已有商圈，未成功加入的商户才保留初始化聚类产生的纯数字字符串 ID。已有商圈不受最小社区规模过滤影响，新聚类仍按 `min_merchant_count` 过滤。初始化结果先通过 `spdbccc_data.write_table` 批量写入 `dev_icamp.icamp_merchant_cluster_algo_output_tmp` 临时表，再通过一条 `INSERT OVERWRITE ... SELECT` SQL 覆盖写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的 T-1 整个分区；任务会在写入前后清理临时表，不保留该分区的历史行，也不再写入风险商户表。
 
@@ -66,13 +72,15 @@ python scripts/test_hive_partition_read.py
 
 脚本会依次输出分区目录是否存在、`part*` 文件数量、每个分片的行列数和耗时；读取成功后输出总行数、字段列表和指定行数的数据预览，最后输出 `taskfinish_start` 和 `taskfinish_success`。脚本只依赖 `pandas`、parquet 读取引擎以及线上环境提供的 `spdbccc_data.mountCheck` 和 `spdbccc_data.task`。
 
-在项目根目录运行唯一主入口：
+在项目根目录可以直接运行 Python 入口：
 
 ```powershell
 python run_hive_business_district.py
 ```
 
-主入口包含静态算法参数、Hive 表和任务生命周期配置，并按参数表 `is_daily` 自动选择增量归属或初始化聚类。
+也可以打开同目录的 `run_hive_business_district.ipynb` 并运行全部单元，将 Notebook 作为程序入口。Notebook 不复制任务配置，只导入并调用 Python 入口的 `main()`，因此配置只需在 `run_hive_business_district.py` 中维护。
+
+Python 入口包含静态算法参数、Hive 表和任务生命周期配置，并按参数表 `is_daily` 自动选择增量归属或初始化聚类。
 
 `run_hive_business_district.py` 通过 `HiveTaskConfig` 显式传入强类型算法配置、归属配置、输入表、参数表、输出表、临时表和 `dt_expression`；初始化与增量任务共用同一份 `AssignmentConfig`，入口先普通读取参数表 T-1 分区，再按 `is_daily` 调度：`1` 调用增量归属，`0` 调用初始化聚类。
 
