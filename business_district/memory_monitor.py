@@ -37,6 +37,12 @@ class MemoryReport:
     peak_location: CodeLocation
 
 
+@dataclass(frozen=True)
+class ProcessMemoryUsage:
+    scope: str
+    rss_bytes: int
+
+
 def _parse_linux_statm_rss_bytes(
     statm_text: str,
     page_size_bytes: int,
@@ -216,6 +222,22 @@ def _build_process_memory_reader() -> Tuple[MemoryReader, str]:
     )
 
 
+def _validate_rss_bytes(rss_bytes: int) -> int:
+    if rss_bytes < 0:
+        raise MemoryMonitoringError(
+            f"RSS 内存不能为负数: rss_bytes={rss_bytes}"
+        )
+    return rss_bytes
+
+
+def read_process_memory_usage() -> ProcessMemoryUsage:
+    memory_reader, scope = _build_process_memory_reader()
+    return ProcessMemoryUsage(
+        scope=scope,
+        rss_bytes=_validate_rss_bytes(memory_reader()),
+    )
+
+
 def _build_code_location(frame: FrameType) -> CodeLocation:
     return CodeLocation(
         filename=str(Path(frame.f_code.co_filename).resolve()),
@@ -262,11 +284,7 @@ class ProcessMemoryMonitor:
         self._peak_location: Optional[CodeLocation] = None
 
     def _record_sample(self, location: CodeLocation) -> None:
-        rss_bytes = self._memory_reader()
-        if rss_bytes < 0:
-            raise MemoryMonitoringError(
-                f"RSS 内存不能为负数: rss_bytes={rss_bytes}"
-            )
+        rss_bytes = _validate_rss_bytes(self._memory_reader())
         self._sample_count += 1
         self._rss_bytes_sum += rss_bytes
         if rss_bytes > self._peak_rss_bytes:

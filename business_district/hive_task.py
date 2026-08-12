@@ -751,7 +751,10 @@ def build_initial_assignment_output(
         candidates,
         graph,
         community_state.members,
-        build_latest_merchant_coordinates(transactions),
+        build_latest_merchant_coordinates(
+            transactions,
+            config.geo.maximum_merchants_per_coordinate,
+        ),
         assignment_config,
         datetime.datetime.now().astimezone(),
         config.runtime.process_count,
@@ -857,6 +860,10 @@ class TaskMain:
                 parameter_data,
                 self.task_config.parameter_table,
             )
+            print_probe(
+                "initial_hive.parameters_ready",
+                f"parameter_rows={len(parameters)}",
+            )
             runtime_config = build_runtime_config(
                 parameters,
                 self.task_config.parameter_table,
@@ -870,6 +877,10 @@ class TaskMain:
             logrecord.log_data(
                 f"task parameter_dt={parameter_dt_list}, source_dt={source_dt_list}"
             )
+            print_probe(
+                "initial_hive.source_read_started",
+                f"partition_count={len(source_dt_list)}",
+            )
             source_selection = read_source_hive_table_by_parameters(
                 self.task_config.source_table,
                 source_dt_list,
@@ -877,6 +888,11 @@ class TaskMain:
                 self.task_config.parameter_table,
             )
             filtered_source_data = source_selection.included
+            print_probe(
+                "initial_hive.source_ready",
+                f"included_rows={len(filtered_source_data)}, "
+                f"cross_region_rows={len(source_selection.cross_region)}",
+            )
             update_time = datetime.datetime.now().astimezone()
             if filtered_source_data.empty:
                 transactions = pd.DataFrame()
@@ -888,6 +904,10 @@ class TaskMain:
                     config.input.timestamp_formats,
                     self.dt_var,
                     self.task_config.source_table,
+                )
+                print_probe(
+                    "initial_hive.transactions_ready",
+                    f"transaction_rows={len(transactions)}",
                 )
                 result = run_algorithm_one_from_transactions(
                     config,
@@ -919,7 +939,10 @@ class TaskMain:
                 target_output,
                 cross_region_output,
             )
-            print_probe("o", "")
+            print_probe(
+                "initial_hive.output_ready",
+                f"output_rows={len(target_output)}",
+            )
             if target_output.empty:
                 raise TransactionDataError(
                     "参数匹配交易中没有可输出的分类 1、2 商户: "
@@ -927,6 +950,10 @@ class TaskMain:
                     f"included_rows={len(source_selection.included)}, "
                     f"cross_region_rows={len(source_selection.cross_region)}"
                 )
+            print_probe(
+                "initial_hive.target_write_started",
+                f"output_rows={len(target_output)}",
+            )
             overwrite_target_table(
                 sd,
                 target_output,
@@ -934,7 +961,10 @@ class TaskMain:
                 self.task_config.target_temp_table,
                 self.dt_var,
             )
-            print_probe("t", "")
+            print_probe(
+                "initial_hive.target_write_complete",
+                f"output_rows={len(target_output)}",
+            )
             logrecord.log_data(
                 f"taskrun seconds={time.time() - total_start:.2f}, "
                 f"output_rows={len(target_output)}, "

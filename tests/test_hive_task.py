@@ -35,7 +35,7 @@ def _app_config(tmp_path: Path) -> AppConfig:
         cooccurrence=CooccurrenceConfig(1, 1.0, 1),
         graph=GraphConfig("transaction_count", 0.75, 1.0, 5, 0.0),
         community=CommunityConfig("leiden", 1.0, 42, 10),
-        geo=GeoConfig(1000.0),
+        geo=GeoConfig(1000.0, 100),
         anchors=AnchorConfig(1, 2, 2, 1, 0.99, 1.0, 100),
         output=OutputConfig(tmp_path / "output"),
         runtime=RuntimeConfig(2),

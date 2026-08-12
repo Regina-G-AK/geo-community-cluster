@@ -36,7 +36,7 @@ def _app_config(output_directory: Path) -> AppConfig:
         cooccurrence=CooccurrenceConfig(1, 1.0, 1),
         graph=GraphConfig("transaction_count", 0.75, 1.0, 10, 0.0),
         community=CommunityConfig("leiden", 1.0, 42, 10),
-        geo=GeoConfig(1000.0),
+        geo=GeoConfig(1000.0, 100),
         anchors=AnchorConfig(1, 2, 2, 1, 0.99, 1.0, 100),
         output=OutputConfig(output_directory),
         runtime=RuntimeConfig(2),
@@ -315,6 +315,68 @@ def test_incremental_output_uses_nearest_geographic_member_before_pmi(
     )
 
     assert output.loc[0, "community_id"] == "8"
+    assert output.loc[0, "is_abnormal"] == "1"
+
+
+def test_unreliable_shared_coordinate_uses_transaction_edge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    transactions = pd.DataFrame(
+        [
+            {
+                hive_task.MERCHANT: "new-shop",
+                hive_task.TIMESTAMP: pd.Timestamp("2026-01-01 10:00:00"),
+                hive_task.LONGITUDE: 121.0,
+                hive_task.LATITUDE: 31.0,
+            },
+            {
+                hive_task.MERCHANT: "shared-shop",
+                hive_task.TIMESTAMP: pd.Timestamp("2026-01-01 10:00:00"),
+                hive_task.LONGITUDE: 121.0,
+                hive_task.LATITUDE: 31.0,
+            },
+            {
+                hive_task.MERCHANT: "member-a",
+                hive_task.TIMESTAMP: pd.Timestamp("2026-01-01 10:00:00"),
+                hive_task.LONGITUDE: 121.01,
+                hive_task.LATITUDE: 31.01,
+            },
+        ]
+    )
+    merchant_coordinates = hive_task.build_latest_merchant_coordinates(
+        transactions,
+        1,
+    )
+    graph = nx.Graph()
+    graph.add_edge("new-shop", "member-a", weight=2.0)
+
+    output = hive_task.build_incremental_output(
+        [
+            hive_task.HiveCandidateMerchant(
+                storename="new-shop",
+                region="shanghai",
+                dt="20260101",
+                merchant_category=1,
+            )
+        ],
+        graph,
+        {
+            "member-a": hive_task.CommunityMember(
+                "member-a",
+                "7",
+                False,
+            )
+        },
+        merchant_coordinates,
+        _config(3000.0),
+        datetime.fromisoformat("2026-01-01T10:00:00"),
+        1,
+    )
+
+    assert set(merchant_coordinates) == {"member-a"}
+    assert output.loc[0, "community_id"] == "7"
     assert output.loc[0, "is_abnormal"] == "1"
 
 

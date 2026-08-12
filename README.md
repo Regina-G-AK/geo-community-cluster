@@ -12,7 +12,7 @@
 
 每次运行会在全部商户对统计计算完成后，直接向项目根目录 `code` 文件夹下的 `pair_statistics_{region}.pkl` 写入商户对中间数据，不使用 `.tmp` 临时文件，其中 `region` 使用 `[city].code`。文件使用 Python pickle protocol 4，顶层对象为 `business_district.graph.PairStatistics`，包含以有序商户二元组为键的 `strengths`、同键的 `supports`，以及以商户 ID 为键的 `merchant_visit_counts`；该格式可由项目要求的 Python 3.7 读取。
 
-可以使用独立诊断脚本分析该中间文件。分析逻辑只依赖 Python 标准库，不导入项目业务模块；任务入口使用线上环境提供的 `spdbccc_data` 执行挂载检查、运行、销毁和 `finish_task()` 收尾。脚本会复算最小支持人数、SPPMI、z-score、互为 top-k 和访问量型连锁商户删除等阶段，并直接打印总体摘要、分布、连通分量和重点商户指标。由于中间文件不包含商户分类和坐标，脚本不能复算分类 `2` 商户删除、地理种子边和疑似线上商户识别。pickle 文件只应来自可信任务输出。
+可以使用独立诊断脚本分析该中间文件。分析逻辑只依赖 Python 标准库，不导入项目业务模块；任务入口使用线上环境提供的 `spdbccc_data` 执行挂载检查、运行、销毁和 `finish_task()` 收尾。脚本会复算最小支持人数、SPPMI、z-score、互为 top-k 和访问量型连锁商户删除等阶段，并直接打印总体摘要、分布、连通分量和重点商户指标。由于中间文件不包含商户分类和坐标，脚本不能复算分类 `2` 商户删除和疑似线上商户识别。pickle 文件只应来自可信任务输出。
 
 ```powershell
 python scripts/analyze_pair_statistics.py
@@ -84,7 +84,9 @@ Python 入口包含静态算法参数、Hive 表和任务生命周期配置，�
 
 `run_hive_business_district.py` 通过 `HiveTaskConfig` 显式传入强类型算法配置、归属配置、输入表、参数表、输出表、临时表和 `dt_expression`；初始化与增量任务共用同一份 `AssignmentConfig`，入口先普通读取参数表 T-1 分区，再按 `is_daily` 调度：`1` 调用增量归属，`0` 调用初始化聚类。
 
-增量归属用于把新商户追加归入已有商圈。任务先读取参数表和输入表；输入表需要包含 `business_district` 字段。增量任务根据主入口中的 `algorithm_config.city.code` 和 `algorithm_config.output.directory` 定位初始化聚类写出的 `pair_statistics_{region}.pkl`，文件不存在时直接报错。有有效经纬度的新商户直接继承距离最近且位于配置半径内的已有商圈成员 ID，不进行地理投票；没有有效经纬度时直接继承正 PMI/SPPMI 边权最大的已有商圈邻居 ID，不进行图投票。只有距离阈值在主入口中通过 `AssignmentConfig` 显式设置。
+初始化与增量任务会在源数据读取、交易对统计、图构建、聚类或归属、结果写入等关键阶段输出 `[stage]` 日志。每条日志都包含阶段名、当前进程 RSS 内存（Linux 包含后代进程）和阶段数据量；输出使用即时刷新，任务运行期间可直接观察进度与内存变化。交易对统计会继续输出按卡分组、各工作分片的访问处理量和候选比较次数，以及父进程合并进度；每个工作进程只处理一个分片后退出，生产入口只维护一份累计商户对字典，不为每个分片复制完整快照。坐标可靠性日志会输出有坐标商户数、被异常共享坐标排除的商户数以及单一坐标最大商户数。任务结束时仍会输出峰值和平均 RSS 汇总。
+
+增量归属用于把新商户追加归入已有商圈。任务先读取参数表和输入表；输入表需要包含 `business_district` 字段。增量任务根据主入口中的 `algorithm_config.city.code` 和 `algorithm_config.output.directory` 定位初始化聚类写出的 `pair_statistics_{region}.pkl`，文件不存在时直接报错。有可靠经纬度的新商户直接继承距离最近且位于配置半径内的已有商圈成员 ID，不进行地理投票；没有经纬度或坐标共享商户数超过可靠性上限时，直接继承正 PMI/SPPMI 边权最大的已有商圈邻居 ID，不进行图投票。距离阈值由 `AssignmentConfig` 显式设置，坐标共享商户数上限由 `GeoConfig` 显式设置。
 
 ## 商圈图生成
 
@@ -114,14 +116,14 @@ python scripts/draw_community_graphs.py merchants.csv community_graphs
 - `global_flow_number`：流水号，必须非空且唯一。
 - `storename`：商户名称，用作聚类商户 ID。
 - `transaction_time`：交易时间，按 `[input].timestamp_formats` 解析。
-- `pos_longitude`：经度，可为空；非空时参与 1000 米地理种子聚类。
-- `pos_latitude`：纬度，可为空；非空时参与 1000 米地理种子聚类。
+- `pos_longitude`：经度，可为空；可靠坐标用于疑似线上识别和聚类后的已有商圈归属。
+- `pos_latitude`：纬度，可为空；可靠坐标用于疑似线上识别和聚类后的已有商圈归属。
 - `region`：地区，输出使用该商户最新交易时间对应的值。
 - `is_intefere`：输入可为空，初始化聚类忽略该字段。
 - `status`：输入可为空，初始化聚类忽略该字段。
 - `dt`：日期，不参与算法，输出使用该商户最新交易时间对应的值。
 
-算法会先读取经纬度并构建地理种子：每个 `storename` 只提取一组有效数值坐标，同一商户存在多组不同有效坐标时会明确报错并给出商户名和坐标样例；随后按地理距离把有坐标商户聚成种子社区，再用交易共现 PMI/交易次数边把无坐标或未进入地理簇的商户接入这些社区。人工干预、输入状态和 `dt` 不参与算法。
+初始化聚类只使用交易共现 PMI/交易次数边，不构建地理商户对。每个 `storename` 只提取一组有效数值坐标，同一商户存在多组不同有效坐标时会明确报错并给出商户名和坐标样例；同一坐标关联商户数超过配置上限时，整组坐标不参与疑似线上识别或已有商圈地理归属，这些商户按无可靠坐标处理。人工干预、输入状态和 `dt` 不参与算法。
 
 ## 输出
 
@@ -147,7 +149,7 @@ Hive 入口输入表必须包含：
 - `is_abnormal`
 - `business_district`
 
-`merchant_category` 必须是 `0`（线上）、`1`（线下）、`2`（线下连锁店）或 `3`（线下个体户）；同一 `storename` 对应多个分类会直接报错。初始化和增量任务只保留分类 `1`、`2` 的交易进入访问合并、候选边构建和聚类。分类 `2` 不进入社区发现且永远不能成为锚点；无法加入已有商圈而进入新聚类时，可按正权重候选社区展开为一个或多个普通商圈成员；直接加入已有商圈时与其他分类一样只输出一个商圈 ID。`pos_longitude`、`pos_latitude`、`is_interfere`、`is_abnormal` 和 `business_district` 在输入时允许为空；但同一 `storename` 一旦提供 `business_district`，其所有非空值必须一致。`dt` 是 Hive 分区和输出字段，不要求读取结果包含该列；缺失时入口会按分区或任务日期补齐。经纬度只空一列、格式非法或越界时按无坐标处理；同一 `storename` 的有效数值经纬度必须一致，有效经纬度会参与初始化地理种子聚类。
+`merchant_category` 必须是 `0`（线上）、`1`（线下）、`2`（线下连锁店）或 `3`（线下个体户）；同一 `storename` 对应多个分类会直接报错。初始化和增量任务只保留分类 `1`、`2` 的交易进入访问合并、候选边构建和聚类。分类 `2` 不进入社区发现且永远不能成为锚点；无法加入已有商圈而进入新聚类时，可按正权重候选社区展开为一个或多个普通商圈成员；直接加入已有商圈时与其他分类一样只输出一个商圈 ID。`pos_longitude`、`pos_latitude`、`is_interfere`、`is_abnormal` 和 `business_district` 在输入时允许为空；但同一 `storename` 一旦提供 `business_district`，其所有非空值必须一致。`dt` 是 Hive 分区和输出字段，不要求读取结果包含该列；缺失时入口会按分区或任务日期补齐。经纬度只空一列、格式非法或越界时按无坐标处理；同一 `storename` 的有效数值经纬度必须一致，可靠经纬度只用于疑似线上识别和聚类后的已有商圈归属。
 
 Hive 参数表 `dev_icamp.icamp_merchant_cluster_algo_param` 必须包含：
 
@@ -195,11 +197,12 @@ Hive 目标表 `is_abnormal` 输出以下商户状态码：
 python -m pytest
 ```
 
-## 地理种子参数
+## 地理归属参数
 
-- `[geo].cluster_radius_meters`：地理种子聚类半径，当前配置为 `1000.0` 米。每个商户只使用一组经过一致性校验的有效坐标参与地理种子聚类；地理邻居通过空间网格筛选后再计算精确球面距离。
-- `[community].minimum_online_neighbor_count`：疑似线上商户至少需要关联的有坐标商户数；初始化流程使用 `[geo].cluster_radius_meters` 判断这些关联商户是否距离较远。
-- 直接归属只使用 `AssignmentConfig.community_assignment_distance_meters` 限制有坐标商户可继承的最近已有商圈成员；无坐标商户不执行疑似线上判断，直接使用最强正 PMI/SPPMI 边。
+- `[geo].cluster_radius_meters`：疑似线上识别使用的关联商户距离阈值，当前配置为 `1000.0` 米；初始化聚类不使用该值生成地理边。
+- `[geo].maximum_merchants_per_coordinate`：同一坐标可用于地理判断和归属的最大商户数，当前配置为 `100`；超过后整组坐标按不可靠坐标处理。
+- `[community].minimum_online_neighbor_count`：疑似线上商户至少需要关联的可靠坐标商户数。
+- `AssignmentConfig.community_assignment_distance_meters`：限制可靠坐标商户可继承的最近已有商圈成员，当前配置为 `3000.0` 米；没有可靠坐标的商户使用最强正 PMI/SPPMI 边。
 
 ## 商户对聚类参数
 

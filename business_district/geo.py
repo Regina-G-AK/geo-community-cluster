@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 import networkx as nx
 import pandas as pd
 
 from business_district.errors import TransactionDataError
+from business_district.probes import print_probe
 from business_district.transactions import (
     LATITUDE,
     LONGITUDE,
@@ -16,6 +17,8 @@ from business_district.transactions import (
 )
 
 EARTH_RADIUS_METERS = 6371008.8
+SEED_PAIR_POINT_PROGRESS_INTERVAL = 1000
+SEED_PAIR_COUNT_PROGRESS_START = 1000000
 
 
 @dataclass(frozen=True)
@@ -87,7 +90,10 @@ def _nearby_coordinate_pairs(
 ) -> Tuple[Tuple[str, str], ...]:
     points_by_cell: Dict[Tuple[int, int, int], List[CoordinatePoint]] = {}
     pairs: List[Tuple[str, str]] = []
-    for point in points:
+    candidate_comparison_count = 0
+    maximum_cell_merchant_count = 0
+    next_pair_probe_count = SEED_PAIR_COUNT_PROGRESS_START
+    for point_index, point in enumerate(points):
         cell = _spatial_cell(point, radius_meters)
         for x_offset in (-1, 0, 1):
             for y_offset in (-1, 0, 1):
@@ -98,6 +104,7 @@ def _nearby_coordinate_pairs(
                         cell[2] + z_offset,
                     )
                     for neighbor in points_by_cell.get(neighbor_cell, []):
+                        candidate_comparison_count += 1
                         distance = haversine_distance_meters(
                             point.longitude,
                             point.latitude,
@@ -109,21 +116,76 @@ def _nearby_coordinate_pairs(
                                 tuple(sorted((point.item_id, neighbor.item_id)))
                             )
         points_by_cell.setdefault(cell, []).append(point)
-    return tuple(sorted(pairs))
+        current_cell_merchant_count = len(points_by_cell[cell])
+        maximum_cell_merchant_count = max(
+            maximum_cell_merchant_count,
+            current_cell_merchant_count,
+        )
+        processed_point_count = point_index + 1
+        pair_probe_reached = len(pairs) >= next_pair_probe_count
+        if pair_probe_reached:
+            while len(pairs) >= next_pair_probe_count:
+                next_pair_probe_count *= 2
+        if (
+            processed_point_count % SEED_PAIR_POINT_PROGRESS_INTERVAL == 0
+            or pair_probe_reached
+            or processed_point_count == len(points)
+        ):
+            print_probe(
+                "initial.geo.seed_pair_progress",
+                f"processed_point_count={processed_point_count}, "
+                f"total_point_count={len(points)}, "
+                f"candidate_comparison_count={candidate_comparison_count}, "
+                f"accepted_pair_count={len(pairs)}, "
+                f"spatial_cell_count={len(points_by_cell)}, "
+                f"maximum_cell_merchant_count={maximum_cell_merchant_count}",
+            )
+    print_probe(
+        "initial.geo.seed_pair_sort_started",
+        f"pair_count={len(pairs)}",
+    )
+    ordered_pairs = tuple(sorted(pairs))
+    print_probe(
+        "initial.geo.seed_pair_sort_ready",
+        f"pair_count={len(ordered_pairs)}",
+    )
+    return ordered_pairs
 
 
 def _validated_merchant_coordinate_rows(
     transactions: pd.DataFrame,
 ) -> pd.DataFrame:
+    print_probe(
+        "initial.geo.coordinate_row_selection_started",
+        f"transaction_rows={len(transactions)}",
+    )
     positioned = transactions.loc[
         _coordinate_mask(transactions),
         [MERCHANT, LONGITUDE, LATITUDE],
     ].copy()
+    print_probe(
+        "initial.geo.positioned_rows_ready",
+        f"positioned_transaction_rows={len(positioned)}",
+    )
     if positioned.empty:
         return positioned
     positioned[MERCHANT] = positioned[MERCHANT].astype(str)
     distinct = positioned.drop_duplicates(
         subset=[MERCHANT, LONGITUDE, LATITUDE]
+    )
+    coordinate_group_sizes = distinct.groupby(
+        [LONGITUDE, LATITUDE],
+        sort=False,
+    ).size()
+    maximum_merchants_at_same_coordinate = int(coordinate_group_sizes.max())
+    shared_coordinate_count = int((coordinate_group_sizes > 1).sum())
+    print_probe(
+        "initial.geo.distinct_coordinate_rows_ready",
+        f"distinct_coordinate_rows={len(distinct)}, "
+        f"coordinate_count={len(coordinate_group_sizes)}, "
+        f"shared_coordinate_count={shared_coordinate_count}, "
+        f"maximum_merchants_at_same_coordinate="
+        f"{maximum_merchants_at_same_coordinate}",
     )
     coordinate_counts = distinct.groupby(MERCHANT, sort=True).size()
     conflicted_merchants = coordinate_counts.loc[coordinate_counts > 1].index.tolist()
@@ -180,6 +242,48 @@ def build_merchant_coordinates(
     }
 
 
+def filter_reliable_merchant_coordinates(
+    merchant_coordinates: Dict[str, CoordinatePoint],
+    maximum_merchants_per_coordinate: int,
+) -> Dict[str, CoordinatePoint]:
+    if maximum_merchants_per_coordinate < 1:
+        raise ValueError(
+            "同一坐标最大商户数必须不小于 1: "
+            f"maximum_merchants_per_coordinate="
+            f"{maximum_merchants_per_coordinate}"
+        )
+    coordinate_counts: Dict[Tuple[float, float], int] = {}
+    for point in merchant_coordinates.values():
+        coordinate = (point.longitude, point.latitude)
+        coordinate_counts[coordinate] = coordinate_counts.get(coordinate, 0) + 1
+    unreliable_coordinates: Set[Tuple[float, float]] = {
+        coordinate
+        for coordinate, merchant_count in coordinate_counts.items()
+        if merchant_count > maximum_merchants_per_coordinate
+    }
+    reliable_coordinates: Dict[str, CoordinatePoint] = {
+        merchant_id: point
+        for merchant_id, point in merchant_coordinates.items()
+        if (point.longitude, point.latitude) not in unreliable_coordinates
+    }
+    maximum_coordinate_merchant_count = (
+        max(coordinate_counts.values()) if coordinate_counts else 0
+    )
+    print_probe(
+        "coordinate_reliability_ready",
+        f"coordinate_merchant_count={len(merchant_coordinates)}, "
+        f"reliable_coordinate_merchant_count={len(reliable_coordinates)}, "
+        f"excluded_coordinate_merchant_count="
+        f"{len(merchant_coordinates) - len(reliable_coordinates)}, "
+        f"unreliable_coordinate_count={len(unreliable_coordinates)}, "
+        f"maximum_coordinate_merchant_count="
+        f"{maximum_coordinate_merchant_count}, "
+        f"maximum_merchants_per_coordinate="
+        f"{maximum_merchants_per_coordinate}",
+    )
+    return reliable_coordinates
+
+
 def is_suspect_online_merchant(
     merchant_id: str,
     graph: nx.Graph,
@@ -227,12 +331,25 @@ def build_geographic_seed_pairs(
     radius_meters: float,
 ) -> Tuple[Tuple[Tuple[str, str], ...], int, int]:
     points = _merchant_coordinate_points(transactions)
+    print_probe(
+        "initial.geo.coordinate_points_ready",
+        f"positioned_merchant_count={len(points)}",
+    )
     if not points:
         return tuple(), 0, 0
     seed_pairs = _nearby_coordinate_pairs(points, radius_meters)
     seed_graph = nx.Graph()
     seed_graph.add_nodes_from(point.item_id for point in points)
+    print_probe(
+        "initial.geo.seed_graph_build_started",
+        f"node_count={len(points)}, edge_count={len(seed_pairs)}",
+    )
     seed_graph.add_edges_from(seed_pairs)
+    print_probe(
+        "initial.geo.seed_graph_ready",
+        f"node_count={seed_graph.number_of_nodes()}, "
+        f"edge_count={seed_graph.number_of_edges()}",
+    )
     seed_cluster_count = sum(
         1
         for component in nx.connected_components(seed_graph)
@@ -267,17 +384,42 @@ def prepare_geographic_transactions(
     transactions: pd.DataFrame,
     radius_meters: float,
 ) -> GeographicPreparation:
-    normalized = transactions.reset_index(drop=True).copy()
+    reset_transactions = transactions.reset_index(drop=True)
+    print_probe(
+        "initial.geo.index_reset_ready",
+        f"row_count={len(reset_transactions)}, "
+        f"column_count={len(reset_transactions.columns)}",
+    )
+    normalized = reset_transactions.copy()
+    print_probe(
+        "initial.geo.normalized_copy_ready",
+        f"row_count={len(normalized)}, column_count={len(normalized.columns)}",
+    )
+    del reset_transactions
     normalized[MERCHANT] = normalized[MERCHANT].astype(str)
+    print_probe(
+        "initial.geo.merchant_id_ready",
+        f"row_count={len(normalized)}",
+    )
     if SOURCE_MERCHANT not in normalized.columns:
         prepared_transactions = normalized.assign(
             **{SOURCE_MERCHANT: normalized[MERCHANT]}
         )
     else:
         prepared_transactions = normalized.copy()
+        print_probe(
+            "initial.geo.prepared_copy_ready",
+            f"row_count={len(prepared_transactions)}, "
+            f"column_count={len(prepared_transactions.columns)}",
+        )
         prepared_transactions[SOURCE_MERCHANT] = prepared_transactions[
             SOURCE_MERCHANT
         ].astype(str)
+    print_probe(
+        "initial.geo.prepared_transactions_ready",
+        f"row_count={len(prepared_transactions)}, "
+        f"column_count={len(prepared_transactions.columns)}",
+    )
     seed_pairs, positioned_merchant_count, seed_cluster_count = (
         build_geographic_seed_pairs(prepared_transactions, radius_meters)
     )

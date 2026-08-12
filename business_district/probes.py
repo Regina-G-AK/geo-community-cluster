@@ -4,8 +4,13 @@ from typing import List, Set
 
 import pandas as pd
 
+from business_district.memory_monitor import (
+    MEBIBYTE_BYTES,
+    read_process_memory_usage,
+)
 
-PROBE_PREFIX = "[p]"
+
+PROBE_PREFIX = "[stage]"
 
 
 def _validate_stage(stage: str) -> str:
@@ -48,7 +53,15 @@ def format_series_probe(series: pd.Series) -> str:
 
 def print_probe(stage: str, details: str) -> None:
     stage_name = _validate_stage(stage)
-    print(f"{PROBE_PREFIX} stage={stage_name}, {details}", flush=True)
+    memory_usage = read_process_memory_usage()
+    rss_mib = memory_usage.rss_bytes / MEBIBYTE_BYTES
+    details_text = f", {details}" if details else ""
+    print(
+        f"{PROBE_PREFIX} stage={stage_name}, "
+        f"memory_scope={memory_usage.scope}, rss_mib={rss_mib:.2f}"
+        f"{details_text}",
+        flush=True,
+    )
 
 
 def print_dataframe_probe(stage: str, dataframe: pd.DataFrame) -> None:

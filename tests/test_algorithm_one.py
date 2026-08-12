@@ -127,7 +127,10 @@ def _app_config(
             random_seed=42,
             minimum_online_neighbor_count=2,
         ),
-        geo=GeoConfig(cluster_radius_meters=1000.0),
+        geo=GeoConfig(
+            cluster_radius_meters=1000.0,
+            maximum_merchants_per_coordinate=100,
+        ),
         anchors=AnchorConfig(
             minimum_count=1,
             maximum_count=2,
@@ -907,7 +910,7 @@ def test_leiden_communities_are_connected_and_deterministic() -> None:
     )
 
 
-def test_pipeline_uses_geographic_seed_and_pmi_to_join_unpositioned_merchant(
+def test_pipeline_uses_only_transaction_edges_for_initial_communities(
     tmp_path: Path,
 ) -> None:
     transaction_path = tmp_path / "data.txt"
@@ -954,7 +957,8 @@ def test_pipeline_uses_geographic_seed_and_pmi_to_join_unpositioned_merchant(
 
     result = run_result.business_results
     communities = result.set_index("storename")["community_id"].to_dict()
-    assert communities["a"] == communities["b"] == communities["x"]
+    assert communities["a"] == communities["x"]
+    assert communities["b"] == ""
 
 
 def test_pipeline_marks_high_visit_merchant_as_suspect_chain_store(

@@ -8,10 +8,13 @@ from business_district.memory_monitor import (
     CodeLocation,
     MemoryMonitoringError,
     MemoryReport,
+    ProcessMemoryUsage,
     ProcessMemoryMonitor,
     create_process_memory_monitor,
     format_memory_report,
+    read_process_memory_usage,
 )
+from business_district.probes import print_probe
 
 
 def test_process_memory_monitor_samples_real_process_memory() -> None:
@@ -30,6 +33,25 @@ def test_process_memory_monitor_samples_real_process_memory() -> None:
     assert report.peak_location.filename
     assert report.peak_location.line_number > 0
     assert report.peak_location.function_name
+
+
+def test_read_process_memory_usage_returns_current_rss() -> None:
+    usage = read_process_memory_usage()
+
+    assert isinstance(usage, ProcessMemoryUsage)
+    assert usage.scope in {"main_process", "main_process_and_descendants"}
+    assert usage.rss_bytes > 0
+
+
+def test_print_probe_includes_stage_and_current_memory(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    print_probe("source_ready", "row_count=10")
+
+    output = capsys.readouterr().out
+    assert output.startswith("[stage] stage=source_ready, memory_scope=")
+    assert ", rss_mib=" in output
+    assert output.endswith(", row_count=10\n")
 
 
 def test_process_memory_monitor_rejects_repeated_start() -> None:

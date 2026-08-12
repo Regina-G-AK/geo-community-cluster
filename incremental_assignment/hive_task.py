@@ -34,6 +34,7 @@ from business_district.graph import (
 )
 from business_district.geo import (
     CoordinatePoint,
+    filter_reliable_merchant_coordinates,
     haversine_distance_meters,
 )
 from business_district.hive_task import (
@@ -50,6 +51,7 @@ from business_district.intermediate import (
     read_pair_statistics,
     write_pair_statistics,
 )
+from business_district.probes import print_probe
 from business_district.status_codes import format_status_code
 from business_district.transactions import (
     CARD,
@@ -449,6 +451,7 @@ def _community_sort_key(community_id: str) -> Tuple[int, str]:
 
 def build_latest_merchant_coordinates(
     transactions: pd.DataFrame,
+    maximum_merchants_per_coordinate: int,
 ) -> Dict[str, CoordinatePoint]:
     source = _require_columns(
         transactions,
@@ -464,7 +467,7 @@ def build_latest_merchant_coordinates(
         selected.sort_values([MERCHANT, TIMESTAMP])
         .drop_duplicates(subset=[MERCHANT], keep="last")
     )
-    return {
+    merchant_coordinates: Dict[str, CoordinatePoint] = {
         _clean_text(row[MERCHANT]): CoordinatePoint(
             item_id=_clean_text(row[MERCHANT]),
             longitude=float(row[LONGITUDE]),
@@ -473,6 +476,10 @@ def build_latest_merchant_coordinates(
         for row in latest.to_dict("records")
         if _clean_text(row[MERCHANT])
     }
+    return filter_reliable_merchant_coordinates(
+        merchant_coordinates,
+        maximum_merchants_per_coordinate,
+    )
 
 
 def _strongest_pmi_community_id(
@@ -712,6 +719,10 @@ class TaskMain:
                 parameter_data,
                 self.task_config.parameter_table,
             )
+            print_probe(
+                "incremental_hive.parameters_ready",
+                f"parameter_rows={len(parameters)}",
+            )
             runtime_config = build_runtime_config(
                 parameters,
                 self.task_config.parameter_table,
@@ -730,6 +741,10 @@ class TaskMain:
             logrecord.log_data(
                 f"incremental task parameter_dt={parameter_dt_list}, "
                 f"source_dt={source_dt_list}"
+            )
+            print_probe(
+                "incremental_hive.source_read_started",
+                f"partition_count={len(source_dt_list)}",
             )
             source_data = sd.read_table(self.task_config.source_table, dt=source_dt_list)
             source_selection = split_source_data_by_parameters(
@@ -750,6 +765,11 @@ class TaskMain:
                     f"source_rows={len(source_data)}"
                 )
             filtered_source_data = source_selection.included
+            print_probe(
+                "incremental_hive.source_ready",
+                f"included_rows={len(filtered_source_data)}, "
+                f"cross_region_rows={len(source_selection.cross_region)}",
+            )
             update_time = datetime.datetime.now().astimezone()
             if filtered_source_data.empty:
                 target_output = pd.DataFrame(columns=TARGET_COLUMNS)
@@ -764,6 +784,10 @@ class TaskMain:
                     self.task_config.source_table,
                 )
                 visits = merge_visits(transactions, self.task_config.visit_config)
+                print_probe(
+                    "incremental_hive.pair_statistics_started",
+                    f"transaction_rows={len(transactions)}, visit_rows={len(visits)}",
+                )
                 incremental_statistics = build_pair_statistics(
                     visits,
                     cooccurrence_config,
@@ -778,10 +802,21 @@ class TaskMain:
                     incremental_statistics,
                 )
                 write_pair_statistics(statistics, pair_statistics_path)
+                print_probe(
+                    "incremental_hive.pair_statistics_ready",
+                    f"pair_count={len(statistics.strengths)}, "
+                    f"merchant_count={len(statistics.merchant_visit_counts)}",
+                )
+                print_probe("incremental_hive.graph_started", "")
                 graph = build_sparse_graph(
                     statistics,
                     cooccurrence_config,
                     self.task_config.graph_config,
+                )
+                print_probe(
+                    "incremental_hive.graph_ready",
+                    f"node_count={graph.number_of_nodes()}, "
+                    f"edge_count={graph.number_of_edges()}",
                 )
                 source_state = build_source_community_state(
                     transactions,
@@ -792,7 +827,15 @@ class TaskMain:
                     set(source_state.existing_storenames),
                     self.dt_var,
                 )
-                coordinates = build_latest_merchant_coordinates(transactions)
+                coordinates = build_latest_merchant_coordinates(
+                    transactions,
+                    algorithm_config.geo.maximum_merchants_per_coordinate,
+                )
+                print_probe(
+                    "incremental_hive.assignment_started",
+                    f"candidate_count={len(candidates)}, "
+                    f"community_member_count={len(source_state.members)}",
+                )
                 target_output = build_incremental_output(
                     candidates,
                     graph,
@@ -801,6 +844,10 @@ class TaskMain:
                     self.task_config.assignment_config,
                     update_time,
                     algorithm_config.runtime.process_count,
+                )
+                print_probe(
+                    "incremental_hive.assignment_ready",
+                    f"output_rows={len(target_output)}",
                 )
                 community_rows = len(source_state.members)
                 candidate_count = len(candidates)
@@ -825,12 +872,20 @@ class TaskMain:
                     f"included_rows={len(source_selection.included)}, "
                     f"cross_region_rows={len(source_selection.cross_region)}"
                 )
+            print_probe(
+                "incremental_hive.target_write_started",
+                f"output_rows={len(target_output)}",
+            )
             insert_new_target_rows(
                 sd,
                 target_output,
                 self.task_config.target_table,
                 self.task_config.target_temp_table,
                 self.dt_var,
+            )
+            print_probe(
+                "incremental_hive.target_write_complete",
+                f"output_rows={len(target_output)}",
             )
             logrecord.log_data(
                 f"incremental taskrun seconds={time.time() - total_start:.2f}, "

@@ -94,7 +94,10 @@ def build_algorithm_config(
             random_seed=42,
             minimum_online_neighbor_count=30,
         ),
-        geo=GeoConfig(cluster_radius_meters=1000.0),
+        geo=GeoConfig(
+            cluster_radius_meters=1000.0,
+            maximum_merchants_per_coordinate=100,
+        ),
         anchors=AnchorConfig(
             minimum_count=3,
             maximum_count=10,

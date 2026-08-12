@@ -8,9 +8,8 @@ import pandas as pd
 from business_district.community import CleaningResult, clean_graph
 from business_district.config import AppConfig
 from business_district.geo import (
-    add_geographic_seed_edges,
     build_merchant_coordinates,
-    prepare_geographic_transactions,
+    filter_reliable_merchant_coordinates,
 )
 from business_district.graph import (
     PairStatistics,
@@ -63,34 +62,50 @@ def run_algorithm_one_from_transactions(
 ) -> RunResult:
     started_at = datetime.now().astimezone()
     output_directory = config.output.directory
-    geographic_preparation = prepare_geographic_transactions(
-        transactions,
-        config.geo.cluster_radius_meters,
+    print_probe(
+        "initial.prepare_started",
+        f"transaction_rows={len(transactions)}",
     )
-    prepared_transactions = geographic_preparation.transactions
-    merchant_coordinates = build_merchant_coordinates(prepared_transactions)
+    prepared_transactions = transactions
+    merchant_coordinates = filter_reliable_merchant_coordinates(
+        build_merchant_coordinates(prepared_transactions),
+        config.geo.maximum_merchants_per_coordinate,
+    )
     merchant_metadata = build_merchant_metadata(prepared_transactions)
     visits = merge_visits(prepared_transactions, config.visits)
+    print_probe(
+        "initial.visits_ready",
+        f"prepared_transaction_rows={len(prepared_transactions)}, "
+        f"visit_rows={len(visits)}, merchant_count={len(merchant_metadata)}",
+    )
     # 逐步更新暂时停用，完整计算后一次性写入
+    print_probe("initial.pair_statistics_started", f"visit_rows={len(visits)}")
     statistics: PairStatistics = build_pair_statistics(
         visits,
         config.cooccurrence,
         config.runtime.process_count,
     )
+    print_probe(
+        "initial.pair_statistics_ready",
+        f"pair_count={len(statistics.strengths)}, "
+        f"merchant_count={len(statistics.merchant_visit_counts)}",
+    )
     write_pair_statistics(
         statistics,
         build_pair_statistics_path(output_directory, config.city.code),
     )
+    print_probe("initial.graph_started", "")
     transaction_graph = build_sparse_graph(
         statistics,
         config.cooccurrence,
         config.graph,
     )
-    graph = add_geographic_seed_edges(
-        transaction_graph,
-        geographic_preparation.seed_pairs,
+    graph = transaction_graph
+    print_probe(
+        "initial.graph_ready",
+        f"node_count={graph.number_of_nodes()}, "
+        f"edge_count={graph.number_of_edges()}",
     )
-    print_probe("g", "")
     chain_visit_count_threshold = calculate_chain_visit_count_threshold(
         list(statistics.merchant_visit_counts.values()),
         config.anchors,
@@ -110,11 +125,21 @@ def run_algorithm_one_from_transactions(
     )
     clustering_graph = graph.copy()
     clustering_graph.remove_nodes_from(chain_like_merchant_ids)
+    print_probe(
+        "initial.community_detection_started",
+        f"clustering_node_count={clustering_graph.number_of_nodes()}, "
+        f"chain_like_merchant_count={len(chain_like_merchant_ids)}",
+    )
     cleaning: CleaningResult = clean_graph(
         clustering_graph,
         config.community,
         merchant_coordinates,
         config.geo.cluster_radius_meters,
+    )
+    print_probe(
+        "initial.community_detection_ready",
+        f"community_count={len(set(cleaning.partition.values()))}, "
+        f"edge_count={cleaning.graph.number_of_edges()}",
     )
     edge_candidates = calculate_edge_candidates(
         statistics,
@@ -149,6 +174,10 @@ def run_algorithm_one_from_transactions(
         merchant_metadata,
         started_at,
         config.anchors.minimum_community_size,
+    )
+    print_probe(
+        "initial.results_ready",
+        f"merchant_rows={len(business_results)}, community_rows={len(communities)}",
     )
     return RunResult(
         summary=RunSummary(
