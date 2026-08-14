@@ -26,10 +26,11 @@ from business_district.hive_task import (
     TaskMain as InitialTaskMain,
     load_hive_algorithm_parameters,
 )
-from business_district.memory_monitor import (
-    create_process_memory_monitor,
-    format_memory_report,
-)
+# 资源检测已停用，保留原导入代码便于恢复
+# from business_district.memory_monitor import (
+#     create_process_memory_monitor,
+#     format_memory_report,
+# )
 from incremental_assignment.hive_task import (
     HiveTaskConfig as IncrementalHiveTaskConfig,
     HiveTaskSummary as IncrementalHiveTaskSummary,
@@ -40,7 +41,8 @@ from incremental_assignment.models import AssignmentConfig
 TimestampFormats = Tuple[str, ...]
 HiveTask = Union[InitialTaskMain, IncrementalTaskMain]
 HiveTaskSummary = Union[InitialHiveTaskSummary, IncrementalHiveTaskSummary]
-MEMORY_SAMPLE_INTERVAL_SECONDS = 0.2
+# 资源检测已停用，保留原采样间隔便于恢复
+# MEMORY_SAMPLE_INTERVAL_SECONDS = 0.2
 
 
 def build_timestamp_formats() -> TimestampFormats:
@@ -176,20 +178,20 @@ def load_task_mode(initial_task_config: InitialHiveTaskConfig) -> Tuple[str, boo
 
 
 def run_task(task: HiveTask) -> HiveTaskSummary:
-    memory_monitor = create_process_memory_monitor(
-        MEMORY_SAMPLE_INTERVAL_SECONDS,
-    )
-    memory_monitor.start()
+    # 资源检测已停用，保留原启动代码便于恢复
+    # memory_monitor = create_process_memory_monitor(
+    #     MEMORY_SAMPLE_INTERVAL_SECONDS,
+    # )
+    # memory_monitor.start()
     try:
-        try:
-            task.check()
-            summary = task.taskrun()
-        finally:
-            task.destroy()
-            taskfinish.finish_task()
+        task.check()
+        summary = task.taskrun()
     finally:
-        memory_report = memory_monitor.stop()
-        print(format_memory_report(memory_report), flush=True)
+        task.destroy()
+        taskfinish.finish_task()
+        # 资源检测已停用，保留原停止和报告代码便于恢复
+        # memory_report = memory_monitor.stop()
+        # print(format_memory_report(memory_report), flush=True)
 
     return summary
 

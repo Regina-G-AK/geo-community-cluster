@@ -4,7 +4,6 @@ import datetime
 import multiprocessing
 import time
 from dataclasses import dataclass
-from types import ModuleType
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple, Union
 
 import networkx as nx
@@ -28,7 +27,6 @@ from business_district.cross_region import (
 )
 from business_district.errors import TransactionDataError
 from business_district.graph import (
-    PairStatistics,
     build_pair_statistics,
     build_sparse_graph,
 )
@@ -40,43 +38,35 @@ from business_district.geo import (
 from business_district.hive_task import (
     HiveAlgorithmParameter,
     PARAMETER_TABLE,
+    SourceDataSelection,
+    TARGET_COLUMNS,
     build_runtime_config,
     build_source_dt_list,
     filter_source_data_by_parameters as filter_initial_source_data_by_parameters,
     load_hive_algorithm_parameters,
+    overwrite_target_table,
     split_source_data_by_parameters,
 )
 from business_district.intermediate import (
     build_pair_statistics_path,
-    read_pair_statistics,
     write_pair_statistics,
 )
 from business_district.probes import print_probe
 from business_district.status_codes import format_status_code
 from business_district.transactions import (
-    CARD,
     DT,
-    FLOW_NUMBER,
-    HIVE_SOURCE_COLUMNS,
     LATITUDE,
     LONGITUDE,
     MERCHANT,
     MERCHANT_CATEGORY,
     RAW_ABNORMAL,
     RAW_BUSINESS_DISTRICT,
-    RAW_CARD,
     RAW_INTERFERE,
-    RAW_LATITUDE,
-    RAW_LONGITUDE,
     RAW_MERCHANT,
-    RAW_MERCHANT_CATEGORY,
-    RAW_TIMESTAMP,
     REGION,
     TIMESTAMP,
-    filter_clustering_merchant_categories,
-    keep_first_hive_flow_number_rows,
+    load_hive_transactions,
     merge_visits,
-    _parse_coordinates,
 )
 from incremental_assignment.models import AssignmentConfig
 
@@ -87,28 +77,9 @@ NORMAL_STATUS = "normal"
 SUSPECT_ISOLATED_STATUS = "suspect_isolated"
 # 暂停疑似跨区域判断，保留状态名供后续恢复
 # SUSPECT_CROSS_REGION_STATUS = "suspect_cross_region"
-TARGET_COLUMNS = [
-    "storename",
-    "community_id",
-    "previous_community_id",
-    "region",
-    "is_interfere",
-    "update_time",
-    "is_abnormal",
-    "is_position",
-    "dt",
-]
-TARGET_SELECT_COLUMNS = [
-    "storename",
-    "community_id",
-    "previous_community_id",
-    "region",
-    "is_interfere",
-    "update_time",
-    "is_abnormal",
-    "is_position",
-]
-SOURCE_REQUIRED_COLUMNS = set(HIVE_SOURCE_COLUMNS)
+EXCLUDED_INCREMENTAL_ABNORMAL_STATUSES: FrozenSet[str] = frozenset(
+    {"2", "5", "6"}
+)
 
 
 @dataclass(frozen=True)
@@ -122,7 +93,6 @@ class CommunityMember:
 class SourceCommunityState:
     existing_storenames: FrozenSet[str]
     members: Dict[str, CommunityMember]
-    skipped_multi_community_storenames: FrozenSet[str]
 
 
 @dataclass(frozen=True)
@@ -179,43 +149,70 @@ def _clean_text(value: object) -> str:
     return str(value).strip()
 
 
-def _format_hive_id(value: object) -> str:
-    text = _clean_text(value)
-    if not text:
-        return ""
-    try:
-        numeric = float(text)
-    except ValueError:
-        return text
-    if numeric.is_integer():
-        return str(int(numeric))
-    return text
+def normalize_incremental_abnormal_statuses(values: pd.Series) -> pd.Series:
+    status_text = values.astype("string").str.strip().fillna("")
+    numeric_statuses = pd.to_numeric(status_text, errors="coerce")
+    normalized = status_text.copy()
+    for status_code in ("1", "2", "3", "4", "5", "6", "7"):
+        numeric_status = status_text.ne("") & numeric_statuses.eq(int(status_code))
+        normalized = normalized.mask(numeric_status, status_code)
+    return normalized
 
 
-def _parse_transaction_time(
-    values: pd.Series,
-    timestamp_formats: Tuple[str, ...],
-    table_name: str,
-) -> pd.Series:
-    parsed = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
-    # text_values = values.astype("string").str.strip()
-    for timestamp_format in timestamp_formats:
-        missing = parsed.isna()
-        if not missing.any():
-            break
-        parsed.loc[missing] = pd.to_datetime(
-            values.loc[missing],
-            format=timestamp_format,
-            errors="coerce",
-        )
-    invalid = parsed.isna()
-    if invalid.any():
-        examples = values.loc[invalid].head(5).astype(str).tolist()
-        raise TransactionDataError(
-            "Hive 输入表交易时间解析失败: "
-            f"table={table_name}, invalid_rows={int(invalid.sum())}, examples={examples}"
-        )
-    return parsed
+def split_incremental_abnormal_statuses(
+    source_data: pd.DataFrame,
+    source_table: str,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    source = _require_columns(
+        source_data,
+        {RAW_ABNORMAL},
+        source_table,
+    )
+    abnormal_statuses = normalize_incremental_abnormal_statuses(
+        source[RAW_ABNORMAL]
+    )
+    eligible = ~abnormal_statuses.isin(EXCLUDED_INCREMENTAL_ABNORMAL_STATUSES)
+    normalized = source.copy()
+    normalized[RAW_ABNORMAL] = abnormal_statuses
+    return normalized.loc[eligible].copy(), normalized.loc[~eligible].copy()
+
+
+def filter_incremental_abnormal_statuses(
+    source_data: pd.DataFrame,
+    source_table: str,
+) -> pd.DataFrame:
+    included, _ = split_incremental_abnormal_statuses(
+        source_data,
+        source_table,
+    )
+    return included
+
+
+def preserve_existing_merchants_in_source_selection(
+    source_selection: SourceDataSelection,
+) -> SourceDataSelection:
+    existing_cross_region = (
+        source_selection.cross_region[RAW_BUSINESS_DISTRICT]
+        .astype("string")
+        .str.strip()
+        .fillna("")
+        .ne("")
+    )
+    included = pd.concat(
+        [
+            source_selection.included,
+            source_selection.cross_region.loc[existing_cross_region],
+        ],
+        ignore_index=False,
+        copy=False,
+    ).sort_index()
+    cross_region = source_selection.cross_region.loc[
+        ~existing_cross_region
+    ].copy()
+    return SourceDataSelection(
+        included=included,
+        cross_region=cross_region,
+    )
 
 
 def _filter_source_data_by_parameters(
@@ -239,85 +236,34 @@ def load_incremental_transactions(
     source_table: str,
 ) -> pd.DataFrame:
     source = source_data.copy()
-    # source.columns = source.columns.astype("string").str.strip()
     if DT not in source.columns:
         source[DT] = dt_value
-    source = _require_columns(source, SOURCE_REQUIRED_COLUMNS.union({DT}), source_table)
-    source = filter_clustering_merchant_categories(source, source_table)
-    selected = source[list(HIVE_SOURCE_COLUMNS) + [DT]].copy()
-    selected[RAW_CARD] = selected[RAW_CARD].astype("string").str.strip()
-    selected[FLOW_NUMBER] = selected[FLOW_NUMBER].astype("string").str.strip()
-    selected[RAW_MERCHANT] = selected[RAW_MERCHANT].astype("string").str.strip()
-    selected[RAW_TIMESTAMP] = selected[RAW_TIMESTAMP].astype("string").str.strip()
-    selected[RAW_LONGITUDE] = selected[RAW_LONGITUDE].astype("string").str.strip()
-    selected[RAW_LATITUDE] = selected[RAW_LATITUDE].astype("string").str.strip()
-    selected[REGION] = selected[REGION].astype("string").str.strip()
-    selected[RAW_INTERFERE] = selected[RAW_INTERFERE].astype("string").str.strip()
-    selected[RAW_ABNORMAL] = selected[RAW_ABNORMAL].astype("string").str.strip()
-    selected[RAW_BUSINESS_DISTRICT] = (
-        selected[RAW_BUSINESS_DISTRICT].astype("string").str.strip()
+    source = _require_columns(
+        source,
+        {RAW_MERCHANT, RAW_INTERFERE, RAW_ABNORMAL},
+        source_table,
     )
-    selected[RAW_MERCHANT_CATEGORY] = selected[RAW_MERCHANT_CATEGORY].astype(int)
-    selected[DT] = selected[DT].astype("string").str.strip()
-    invalid = (
-        selected[RAW_CARD].isna()
-        | selected[RAW_CARD].eq("")
-        | selected[FLOW_NUMBER].isna()
-        | selected[FLOW_NUMBER].eq("")
-        | selected[RAW_MERCHANT].isna()
-        | selected[RAW_MERCHANT].eq("")
-        | selected[REGION].isna()
-        | selected[REGION].eq("")
-        | selected[DT].isna()
-        | selected[DT].eq("")
-    )
-    if invalid.any():
-        examples = selected.loc[invalid].head(5).to_dict(orient="records")
-        raise TransactionDataError(
-            "Hive 输入表包含空卡号、流水号、商户名、地区或日期: "
-            f"table={source_table}, invalid_rows={int(invalid.sum())}, examples={examples}"
-        )
-    interfere_values = selected[RAW_INTERFERE].fillna("").str.upper()
+    source = filter_incremental_abnormal_statuses(source, source_table)
+    source[RAW_MERCHANT] = source[RAW_MERCHANT].astype("string").str.strip()
+    source[RAW_INTERFERE] = source[RAW_INTERFERE].astype("string").str.strip()
+    interfere_values = source[RAW_INTERFERE].fillna("").str.upper()
     interfered_storenames = set(
-        selected.loc[
+        source.loc[
             interfere_values.eq("Y"),
             RAW_MERCHANT,
         ].dropna()
     )
     if interfered_storenames:
-        selected = selected.loc[
-            ~selected[RAW_MERCHANT].isin(interfered_storenames)
+        source = source.loc[
+            ~source[RAW_MERCHANT].isin(interfered_storenames)
         ].copy()
-    selected = keep_first_hive_flow_number_rows(selected)
-    selected[TIMESTAMP] = _parse_transaction_time(
-        selected[RAW_TIMESTAMP],
+    transactions = load_hive_transactions(
+        source,
         timestamp_formats,
+        dt_value,
         source_table,
     )
-    selected = _parse_coordinates(selected)
-    result = selected.rename(
-        columns={
-            RAW_CARD: CARD,
-            RAW_MERCHANT: MERCHANT,
-            RAW_MERCHANT_CATEGORY: MERCHANT_CATEGORY,
-        }
-    )
-    return result[
-        [
-            CARD,
-            FLOW_NUMBER,
-            MERCHANT,
-            MERCHANT_CATEGORY,
-            TIMESTAMP,
-            LONGITUDE,
-            LATITUDE,
-            REGION,
-            RAW_INTERFERE,
-            RAW_ABNORMAL,
-            RAW_BUSINESS_DISTRICT,
-            DT,
-        ]
-    ].sort_values([CARD, TIMESTAMP, MERCHANT]).reset_index(drop=True)
+    return transactions
 
 
 def load_source_candidates(
@@ -362,41 +308,6 @@ def build_incremental_cooccurrence_config(
     )
 
 
-def merge_pair_statistics(
-    base_statistics: PairStatistics,
-    incremental_statistics: PairStatistics,
-) -> PairStatistics:
-    strengths: Dict[Tuple[str, str], float] = dict(base_statistics.strengths)
-    supports: Dict[Tuple[str, str], int] = dict(base_statistics.supports)
-    merchant_visit_counts: Dict[str, int] = dict(base_statistics.merchant_visit_counts)
-
-    for pair, strength in incremental_statistics.strengths.items():
-        if pair in strengths:
-            if pair not in supports:
-                raise TransactionDataError(
-                    f"商户对中间文件缺少 support: pair={pair}"
-                )
-            strengths[pair] = float(strengths[pair]) + float(strength)
-        else:
-            if pair not in incremental_statistics.supports:
-                raise TransactionDataError(
-                    f"增量商户对统计缺少 support: pair={pair}"
-                )
-            strengths[pair] = float(strength)
-            supports[pair] = int(incremental_statistics.supports[pair])
-
-    for merchant_id, visit_count in incremental_statistics.merchant_visit_counts.items():
-        merchant_visit_counts[merchant_id] = (
-            int(merchant_visit_counts.get(merchant_id, 0)) + int(visit_count)
-        )
-
-    return PairStatistics(
-        strengths=strengths,
-        supports=supports,
-        merchant_visit_counts=merchant_visit_counts,
-    )
-
-
 def build_source_community_state(
     transactions: pd.DataFrame,
     source_table: str,
@@ -409,25 +320,34 @@ def build_source_community_state(
     community_ids_by_storename: Dict[str, Set[str]] = {}
     for row in source[[MERCHANT, RAW_BUSINESS_DISTRICT]].to_dict("records"):
         storename = _clean_text(row[MERCHANT])
-        community_id = _format_hive_id(row[RAW_BUSINESS_DISTRICT])
+        community_id = _clean_text(row[RAW_BUSINESS_DISTRICT])
         if not storename or not community_id:
             continue
         if storename not in community_ids_by_storename:
             community_ids_by_storename[storename] = set()
         community_ids_by_storename[storename].add(community_id)
 
-    members: Dict[str, CommunityMember] = {}
-    skipped_storenames: Set[str] = set()
-    for storename, community_ids in community_ids_by_storename.items():
-        if len(community_ids) != 1:
-            skipped_storenames.add(storename)
-            continue
-        community_id = sorted(community_ids)[0]
-        members[storename] = CommunityMember(
+    conflicts = {
+        storename: sorted(community_ids)
+        for storename, community_ids in community_ids_by_storename.items()
+        if len(community_ids) > 1
+    }
+    if conflicts:
+        examples = list(sorted(conflicts.items()))[:10]
+        raise TransactionDataError(
+            "Hive 增量输入的同一商户对应多个已有商圈 ID: "
+            f"table={source_table}, conflicted_merchants={len(conflicts)}, "
+            f"examples={examples}"
+        )
+
+    members = {
+        storename: CommunityMember(
             storename=storename,
-            community_id=community_id,
+            community_id=next(iter(community_ids)),
             is_anchor=False,
         )
+        for storename, community_ids in community_ids_by_storename.items()
+    }
 
     if not members:
         raise TransactionDataError(
@@ -438,8 +358,20 @@ def build_source_community_state(
     return SourceCommunityState(
         existing_storenames=frozenset(community_ids_by_storename),
         members=members,
-        skipped_multi_community_storenames=frozenset(skipped_storenames),
     )
+
+
+def build_incremental_source_community_state(
+    transactions: pd.DataFrame,
+    source_table: str,
+) -> SourceCommunityState:
+    source = _require_columns(
+        transactions,
+        {MERCHANT, RAW_ABNORMAL, RAW_BUSINESS_DISTRICT},
+        source_table,
+    )
+    source = filter_incremental_abnormal_statuses(source, source_table)
+    return build_source_community_state(source, source_table)
 
 
 def _community_sort_key(community_id: str) -> Tuple[int, str]:
@@ -671,30 +603,158 @@ def build_incremental_output(
     return pd.DataFrame(rows, columns=TARGET_COLUMNS)
 
 
-def insert_new_target_rows(
-    sd_module: ModuleType,
-    result: pd.DataFrame,
-    table_name: str,
-    temp_table_name: str,
+def build_existing_merchant_output(
+    transactions: pd.DataFrame,
+    members: Dict[str, CommunityMember],
     output_dt: str,
-) -> None:
-    if result.empty:
-        return
-    select_columns = ", ".join(f"source.{column}" for column in TARGET_SELECT_COLUMNS)
-    write_df = result[TARGET_SELECT_COLUMNS].reset_index(drop=True)
-    sd_module.execute_sql(f"drop table if exists {temp_table_name}")
-    try:
-        sd_module.write_table(write_df, temp_table_name, debug=False, dt=None)
-        sd_module.execute_sql(
-            f"""
-            insert into table {table_name}
-            partition (dt={output_dt})
-            select {select_columns}
-            from {temp_table_name} source
-            """
+    update_time: datetime.datetime,
+) -> pd.DataFrame:
+    source = _require_columns(
+        transactions,
+        {MERCHANT, TIMESTAMP, REGION},
+        "transactions",
+    )
+    latest = (
+        source[[MERCHANT, TIMESTAMP, REGION]]
+        .sort_values([MERCHANT, TIMESTAMP, REGION])
+        .drop_duplicates(subset=[MERCHANT], keep="last")
+    )
+    existing = latest.loc[latest[MERCHANT].isin(members)].copy()
+    missing_storenames = sorted(set(members).difference(set(existing[MERCHANT])))
+    if missing_storenames:
+        raise TransactionDataError(
+            "增量输入缺少已有商圈成员的商户信息: "
+            f"missing_storenames={missing_storenames[:10]}"
         )
-    finally:
-        sd_module.execute_sql(f"drop table if exists {temp_table_name}")
+
+    timestamp = update_time.strftime("%Y-%m-%d %H:%M:%S")
+    rows: List[IncrementalOutputRow] = [
+        {
+            "storename": _clean_text(row[MERCHANT]),
+            "community_id": members[_clean_text(row[MERCHANT])].community_id,
+            "previous_community_id": "",
+            "region": _clean_text(row[REGION]),
+            "is_interfere": "N",
+            "update_time": timestamp,
+            "is_abnormal": format_status_code(NORMAL_STATUS),
+            "is_position": 0,
+            "dt": str(output_dt),
+        }
+        for row in existing.to_dict("records")
+    ]
+    return pd.DataFrame(rows, columns=TARGET_COLUMNS)
+
+
+def build_excluded_status_output(
+    source_data: pd.DataFrame,
+    timestamp_formats: Tuple[str, ...],
+    source_table: str,
+    output_dt: str,
+    update_time: datetime.datetime,
+) -> pd.DataFrame:
+    if source_data.empty:
+        return pd.DataFrame(columns=TARGET_COLUMNS)
+
+    transactions = load_hive_transactions(
+        source_data,
+        timestamp_formats,
+        output_dt,
+        source_table,
+    )
+    source = _require_columns(
+        transactions,
+        {
+            MERCHANT,
+            TIMESTAMP,
+            REGION,
+            RAW_ABNORMAL,
+            RAW_BUSINESS_DISTRICT,
+        },
+        source_table,
+    )
+    source[RAW_ABNORMAL] = normalize_incremental_abnormal_statuses(
+        source[RAW_ABNORMAL]
+    )
+    latest = (
+        source.sort_values([MERCHANT, TIMESTAMP], kind="stable")
+        .drop_duplicates(subset=[MERCHANT], keep="last")
+    )
+    excluded = latest.loc[
+        latest[RAW_ABNORMAL].isin(EXCLUDED_INCREMENTAL_ABNORMAL_STATUSES)
+    ]
+    timestamp = update_time.strftime("%Y-%m-%d %H:%M:%S")
+    rows: List[IncrementalOutputRow] = [
+        {
+            "storename": _clean_text(row[MERCHANT]),
+            "community_id": _clean_text(row[RAW_BUSINESS_DISTRICT]),
+            "previous_community_id": "",
+            "region": _clean_text(row[REGION]),
+            "is_interfere": "N",
+            "update_time": timestamp,
+            "is_abnormal": _clean_text(row[RAW_ABNORMAL]),
+            "is_position": 0,
+            "dt": str(output_dt),
+        }
+        for row in excluded.to_dict("records")
+    ]
+    return pd.DataFrame(rows, columns=TARGET_COLUMNS)
+
+
+def apply_excluded_status_output(
+    target_output: pd.DataFrame,
+    excluded_status_output: pd.DataFrame,
+) -> pd.DataFrame:
+    if excluded_status_output.empty:
+        return target_output.reset_index(drop=True)
+
+    excluded_storenames: Set[str] = set(
+        excluded_status_output["storename"].astype(str)
+    )
+    retained = target_output.loc[
+        ~target_output["storename"].isin(excluded_storenames)
+    ]
+    return (
+        pd.concat(
+            [retained, excluded_status_output],
+            ignore_index=True,
+            copy=False,
+        )[TARGET_COLUMNS]
+        .sort_values("storename")
+        .reset_index(drop=True)
+    )
+
+
+def combine_incremental_output(
+    candidate_output: pd.DataFrame,
+    existing_output: pd.DataFrame,
+    transactions: pd.DataFrame,
+    source_table: str,
+) -> pd.DataFrame:
+    expected_storenames = set(transactions[MERCHANT].astype(str))
+    combined = pd.concat(
+        [candidate_output, existing_output],
+        ignore_index=True,
+        copy=False,
+    )
+    duplicated = combined["storename"].duplicated(keep=False)
+    if duplicated.any():
+        examples = sorted(
+            set(combined.loc[duplicated, "storename"].astype(str))
+        )[:10]
+        raise TransactionDataError(
+            "增量结果同一商户存在多条记录: "
+            f"table={source_table}, examples={examples}"
+        )
+    actual_storenames = set(combined["storename"].astype(str))
+    missing_storenames = sorted(expected_storenames.difference(actual_storenames))
+    unexpected_storenames = sorted(actual_storenames.difference(expected_storenames))
+    if missing_storenames or unexpected_storenames:
+        raise TransactionDataError(
+            "增量结果未完整覆盖输入商户: "
+            f"table={source_table}, missing_storenames={missing_storenames[:10]}, "
+            f"unexpected_storenames={unexpected_storenames[:10]}"
+        )
+    return combined[TARGET_COLUMNS].sort_values("storename").reset_index(drop=True)
 
 
 class TaskMain:
@@ -746,36 +806,72 @@ class TaskMain:
                 "incremental_hive.source_read_started",
                 f"partition_count={len(source_dt_list)}",
             )
-            source_data = sd.read_table(self.task_config.source_table, dt=source_dt_list)
+            raw_source_data = sd.read_table(
+                self.task_config.source_table,
+                dt=source_dt_list,
+            )
+            calculation_source_data, excluded_source_data = (
+                split_incremental_abnormal_statuses(
+                    raw_source_data,
+                    self.task_config.source_table,
+                )
+            )
             source_selection = split_source_data_by_parameters(
-                source_data,
+                calculation_source_data,
                 parameters,
                 self.task_config.source_table,
                 self.task_config.parameter_table,
             )
-            if (
-                source_selection.included.empty
-                and source_selection.cross_region.empty
-            ):
+            excluded_source_selection = split_source_data_by_parameters(
+                excluded_source_data,
+                parameters,
+                self.task_config.source_table,
+                self.task_config.parameter_table,
+            )
+            parameter_source_data = pd.concat(
+                [
+                    source_selection.included,
+                    source_selection.cross_region,
+                    excluded_source_selection.included,
+                    excluded_source_selection.cross_region,
+                ],
+                ignore_index=False,
+                copy=False,
+            ).sort_index()
+            source_selection = preserve_existing_merchants_in_source_selection(
+                source_selection,
+            )
+            if parameter_source_data.empty:
                 raise TransactionDataError(
                     "Hive 参数表没有匹配到输入交易: "
                     f"source_table={self.task_config.source_table}, "
                     f"parameter_table={self.task_config.parameter_table}, "
                     f"parameter_count={len(parameters)}, "
-                    f"source_rows={len(source_data)}"
+                    f"source_rows={len(raw_source_data)}"
                 )
             filtered_source_data = source_selection.included
+            excluded_status_rows = (
+                len(excluded_source_selection.included)
+                + len(excluded_source_selection.cross_region)
+            )
             print_probe(
                 "incremental_hive.source_ready",
                 f"included_rows={len(filtered_source_data)}, "
-                f"cross_region_rows={len(source_selection.cross_region)}",
+                f"cross_region_rows={len(source_selection.cross_region)}, "
+                f"excluded_status_rows={excluded_status_rows}",
             )
             update_time = datetime.datetime.now().astimezone()
+            excluded_status_output = build_excluded_status_output(
+                parameter_source_data,
+                self.task_config.timestamp_formats,
+                self.task_config.source_table,
+                self.dt_var,
+                update_time,
+            )
             if filtered_source_data.empty:
                 target_output = pd.DataFrame(columns=TARGET_COLUMNS)
                 community_rows = 0
                 candidate_count = 0
-                skipped_multi_community_count = 0
             else:
                 transactions = load_incremental_transactions(
                     filtered_source_data,
@@ -788,7 +884,7 @@ class TaskMain:
                     "incremental_hive.pair_statistics_started",
                     f"transaction_rows={len(transactions)}, visit_rows={len(visits)}",
                 )
-                incremental_statistics = build_pair_statistics(
+                statistics = build_pair_statistics(
                     visits,
                     cooccurrence_config,
                     algorithm_config.runtime.process_count,
@@ -796,10 +892,6 @@ class TaskMain:
                 pair_statistics_path = build_pair_statistics_path(
                     algorithm_config.output.directory,
                     algorithm_config.city.code,
-                )
-                statistics = merge_pair_statistics(
-                    read_pair_statistics(pair_statistics_path),
-                    incremental_statistics,
                 )
                 write_pair_statistics(statistics, pair_statistics_path)
                 print_probe(
@@ -818,7 +910,7 @@ class TaskMain:
                     f"node_count={graph.number_of_nodes()}, "
                     f"edge_count={graph.number_of_edges()}",
                 )
-                source_state = build_source_community_state(
+                source_state = build_incremental_source_community_state(
                     transactions,
                     self.task_config.source_table,
                 )
@@ -836,7 +928,7 @@ class TaskMain:
                     f"candidate_count={len(candidates)}, "
                     f"community_member_count={len(source_state.members)}",
                 )
-                target_output = build_incremental_output(
+                candidate_output = build_incremental_output(
                     candidates,
                     graph,
                     source_state.members,
@@ -845,15 +937,24 @@ class TaskMain:
                     update_time,
                     algorithm_config.runtime.process_count,
                 )
+                existing_output = build_existing_merchant_output(
+                    transactions,
+                    source_state.members,
+                    self.dt_var,
+                    update_time,
+                )
+                target_output = combine_incremental_output(
+                    candidate_output,
+                    existing_output,
+                    transactions,
+                    self.task_config.source_table,
+                )
                 print_probe(
                     "incremental_hive.assignment_ready",
                     f"output_rows={len(target_output)}",
                 )
                 community_rows = len(source_state.members)
                 candidate_count = len(candidates)
-                skipped_multi_community_count = len(
-                    source_state.skipped_multi_community_storenames
-                )
             cross_region_output = build_cross_region_target_output(
                 source_selection.cross_region,
                 source_selection.included,
@@ -864,6 +965,10 @@ class TaskMain:
             target_output = append_cross_region_target_output(
                 target_output,
                 cross_region_output,
+            )
+            target_output = apply_excluded_status_output(
+                target_output,
+                excluded_status_output,
             )
             if target_output.empty:
                 raise TransactionDataError(
@@ -876,7 +981,7 @@ class TaskMain:
                 "incremental_hive.target_write_started",
                 f"output_rows={len(target_output)}",
             )
-            insert_new_target_rows(
+            overwrite_target_table(
                 sd,
                 target_output,
                 self.task_config.target_table,
@@ -890,9 +995,7 @@ class TaskMain:
             logrecord.log_data(
                 f"incremental taskrun seconds={time.time() - total_start:.2f}, "
                 f"candidate_count={candidate_count}, "
-                f"inserted_rows={len(target_output)}, "
-                f"skipped_multi_community_count="
-                f"{skipped_multi_community_count}"
+                f"inserted_rows={len(target_output)}"
             )
             return HiveTaskSummary(
                 dt=self.dt_var,

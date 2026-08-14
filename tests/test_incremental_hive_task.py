@@ -43,24 +43,6 @@ def _app_config(output_directory: Path) -> AppConfig:
     )
 
 
-class _FakeSd:
-    def __init__(self) -> None:
-        self.sql: list[str] = []
-        self.tables: list[pd.DataFrame] = []
-
-    def execute_sql(self, sql: str) -> None:
-        self.sql.append(sql)
-
-    def write_table(
-        self,
-        dataframe: pd.DataFrame,
-        temp_table_name: str,
-        debug: bool,
-        dt: object,
-    ) -> None:
-        self.tables.append(dataframe.copy())
-
-
 class _FakeTaskSd:
     def __init__(
         self,
@@ -531,30 +513,7 @@ def test_incremental_cooccurrence_config_uses_entrypoint_decay_tau(
     assert hive_task.build_source_dt_list(parameters) == ["20260131"]
 
 
-def test_merge_pair_statistics_keeps_existing_support_and_adds_visits(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install_spdbccc_data_stub(monkeypatch)
-    hive_task = importlib.import_module("incremental_assignment.hive_task")
-    base = PairStatistics(
-        strengths={("a", "b"): 2.0},
-        supports={("a", "b"): 5},
-        merchant_visit_counts={"a": 3, "b": 2},
-    )
-    incremental = PairStatistics(
-        strengths={("a", "b"): 1.5, ("b", "c"): 4.0},
-        supports={("a", "b"): 7, ("b", "c"): 2},
-        merchant_visit_counts={"b": 4, "c": 6},
-    )
-
-    result = hive_task.merge_pair_statistics(base, incremental)
-
-    assert result.strengths == {("a", "b"): 3.5, ("b", "c"): 4.0}
-    assert result.supports == {("a", "b"): 5, ("b", "c"): 2}
-    assert result.merchant_visit_counts == {"a": 3, "b": 6, "c": 6}
-
-
-def test_source_community_state_skips_multi_community_members(
+def test_source_community_state_rejects_multi_community_members(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
@@ -568,12 +527,79 @@ def test_source_community_state_skips_multi_community_members(
         ]
     )
 
-    state = hive_task.build_source_community_state(transactions, "source_table")
+    with pytest.raises(
+        hive_task.TransactionDataError,
+        match="同一商户对应多个已有商圈 ID",
+    ):
+        hive_task.build_source_community_state(transactions, "source_table")
 
-    assert set(state.existing_storenames) == {"stable", "multi"}
-    assert sorted(state.members) == ["stable"]
-    assert state.members["stable"].community_id == "1"
-    assert state.skipped_multi_community_storenames == frozenset({"multi"})
+
+def test_incremental_output_combines_existing_and_candidate_merchants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    transactions = pd.DataFrame(
+        [
+            {
+                hive_task.MERCHANT: "existing-shop",
+                hive_task.TIMESTAMP: pd.Timestamp("2026-01-01 09:00:00"),
+                hive_task.REGION: "shanghai",
+            },
+            {
+                hive_task.MERCHANT: "existing-shop",
+                hive_task.TIMESTAMP: pd.Timestamp("2026-01-01 10:00:00"),
+                hive_task.REGION: "shanghai-new",
+            },
+            {
+                hive_task.MERCHANT: "new-shop",
+                hive_task.TIMESTAMP: pd.Timestamp("2026-01-01 11:00:00"),
+                hive_task.REGION: "shanghai",
+            },
+        ]
+    )
+    members = {
+        "existing-shop": hive_task.CommunityMember(
+            storename="existing-shop",
+            community_id="BD001",
+            is_anchor=False,
+        )
+    }
+    candidate_output = pd.DataFrame(
+        [
+            {
+                "storename": "new-shop",
+                "community_id": "BD001",
+                "previous_community_id": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "update_time": "2026-01-01 12:00:00",
+                "is_abnormal": "1",
+                "is_position": 0,
+                "dt": "20260101",
+            }
+        ],
+        columns=hive_task.TARGET_COLUMNS,
+    )
+
+    existing_output = hive_task.build_existing_merchant_output(
+        transactions,
+        members,
+        "20260101",
+        datetime.fromisoformat("2026-01-01T12:00:00"),
+    )
+    result = hive_task.combine_incremental_output(
+        candidate_output,
+        existing_output,
+        transactions,
+        "source_table",
+    )
+
+    assert result["storename"].tolist() == ["existing-shop", "new-shop"]
+    existing_row = result.loc[result["storename"].eq("existing-shop")].iloc[0]
+    assert existing_row["community_id"] == "BD001"
+    assert existing_row["region"] == "shanghai-new"
+    assert existing_row["is_abnormal"] == "1"
 
 
 def test_filter_source_data_by_parameters_filters_region_and_storename_city(
@@ -686,7 +712,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "pos_latitude": "31.0001",
                 "region": "shanghai",
                 "is_interfere": "N",
-                "is_abnormal": "",
+                "is_abnormal": "3",
                 "business_district": "",
             },
             {
@@ -699,7 +725,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "pos_latitude": "31.0",
                 "region": "shanghai",
                 "is_interfere": "N",
-                "is_abnormal": "1",
+                "is_abnormal": "4",
                 "business_district": "D001",
             },
             {
@@ -715,6 +741,45 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
                 "is_abnormal": "",
                 "business_district": "",
             },
+            {
+                "account_number": "u4",
+                "global_flow_number": "f5",
+                "storename": "广州市天河区异常商户",
+                "merchant_category": "1",
+                "transaction_time": "20260103T120000",
+                "pos_longitude": "",
+                "pos_latitude": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "is_abnormal": "2",
+                "business_district": "",
+            },
+            {
+                "account_number": "u5",
+                "global_flow_number": "f6",
+                "storename": "status-five-shop",
+                "merchant_category": "1",
+                "transaction_time": "20260103T120500",
+                "pos_longitude": "",
+                "pos_latitude": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "is_abnormal": "5",
+                "business_district": "",
+            },
+            {
+                "account_number": "u6",
+                "global_flow_number": "f7",
+                "storename": "status-six-shop",
+                "merchant_category": "2",
+                "transaction_time": "20260103T121000",
+                "pos_longitude": "",
+                "pos_latitude": "",
+                "region": "shanghai",
+                "is_interfere": "N",
+                "is_abnormal": "6",
+                "business_district": "BD006",
+            },
         ]
     )
     fake_sd = _FakeTaskSd(parameter_data, source_data)
@@ -724,9 +789,9 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
     with (output_directory / "pair_statistics_shanghai.pkl").open("wb") as file:
         pickle.dump(
             PairStatistics(
-                strengths={},
-                supports={},
-                merchant_visit_counts={},
+                strengths={("legacy-a", "legacy-b"): 9.0},
+                supports={("legacy-a", "legacy-b"): 9},
+                merchant_visit_counts={"legacy-a": 9, "legacy-b": 9},
             ),
             file,
         )
@@ -758,66 +823,220 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
     assert ("source_table", ["20260131"]) in fake_sd.reads
     assert summary.source_rows == 3
     assert summary.community_rows == 1
-    assert summary.inserted_rows == 2
+    assert summary.inserted_rows == 6
     output_by_storename = fake_sd.tables[0].set_index("storename")
+    assert output_by_storename.loc["old-shop", "community_id"] == "D001"
+    assert output_by_storename.loc["old-shop", "is_abnormal"] == "1"
     assert output_by_storename.loc["new-shop", "community_id"] == "D001"
     assert output_by_storename.loc["new-shop", "is_abnormal"] == "1"
     assert output_by_storename.loc["北京市朝阳区商户", "community_id"] == ""
     assert output_by_storename.loc["北京市朝阳区商户", "is_abnormal"] == "5"
-    assert "partition (dt=20260101)" in "\n".join(fake_sd.sql).lower()
+    assert output_by_storename.loc["广州市天河区异常商户", "is_abnormal"] == "2"
+    assert output_by_storename.loc["status-five-shop", "is_abnormal"] == "5"
+    assert output_by_storename.loc["status-six-shop", "is_abnormal"] == "6"
+    assert output_by_storename.loc["status-six-shop", "community_id"] == "BD006"
+    joined_sql = "\n".join(fake_sd.sql).lower()
+    assert "insert overwrite table target_table" in joined_sql
+    assert "partition (dt='20260101')" in joined_sql
+    assert "insert into table target_table" not in joined_sql
     with (output_directory / "pair_statistics_shanghai.pkl").open("rb") as file:
         statistics = pickle.load(file)
+    assert ("legacy-a", "legacy-b") not in statistics.strengths
     assert statistics.supports[("new-shop", "old-shop")] == 1
     assert statistics.merchant_visit_counts == {"new-shop": 1, "old-shop": 2}
 
 
-def test_insert_new_target_rows_uses_insert_into(
+def test_filter_incremental_abnormal_statuses_excludes_only_2_5_and_6(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
     hive_task = importlib.import_module("incremental_assignment.hive_task")
-    fake_sd = _FakeSd()
-    output = pd.DataFrame(
+    source = pd.DataFrame(
+        {
+            "storename": [
+                "normal",
+                "empty",
+                "missing",
+                "isolated",
+                "lost",
+                "deleted",
+                "custom",
+                "spaced",
+                "numeric",
+                "online",
+                "cross-region",
+                "chain-store",
+                "numeric-chain-store",
+            ],
+            "is_abnormal": [
+                "1",
+                "",
+                None,
+                "3",
+                "4",
+                "7",
+                "8",
+                " 3 ",
+                3.0,
+                "2",
+                "5",
+                "6",
+                6.0,
+            ],
+        }
+    )
+
+    result = hive_task.filter_incremental_abnormal_statuses(
+        source,
+        "source_table",
+    )
+
+    assert result["storename"].tolist() == [
+        "normal",
+        "empty",
+        "missing",
+        "isolated",
+        "lost",
+        "deleted",
+        "custom",
+        "spaced",
+        "numeric",
+    ]
+    assert result["is_abnormal"].tolist() == [
+        "1",
+        "",
+        "",
+        "3",
+        "4",
+        "7",
+        "8",
+        "3",
+        "3",
+    ]
+
+
+def test_split_incremental_abnormal_statuses_keeps_excluded_rows_for_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    source = pd.DataFrame({"is_abnormal": ["2", 5.0, " 6 "]})
+
+    included, excluded = hive_task.split_incremental_abnormal_statuses(
+        source,
+        "source_table",
+    )
+
+    assert included.empty
+    assert excluded["is_abnormal"].tolist() == ["2", "5", "6"]
+
+
+def test_incremental_source_state_uses_business_district_for_existing_merchants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    transactions = pd.DataFrame(
         [
             {
-                "storename": "new-shop",
-                "community_id": "1",
-                "previous_community_id": "",
-                "region": "shanghai",
-                "is_interfere": "N",
-                "update_time": "2026-01-01 10:00:00",
-                "is_abnormal": "1",
-                "is_position": 0,
-                "dt": "20260101",
-            }
+                hive_task.MERCHANT: "existing-shop",
+                hive_task.RAW_ABNORMAL: "",
+                hive_task.RAW_BUSINESS_DISTRICT: "BD001",
+            },
+            {
+                hive_task.MERCHANT: "new-shop",
+                hive_task.RAW_ABNORMAL: "1",
+                hive_task.RAW_BUSINESS_DISTRICT: "",
+            },
         ]
     )
 
-    hive_task.insert_new_target_rows(
-        fake_sd,
-        output,
-        "target_table",
-        "temp_table",
-        "20260102",
+    state = hive_task.build_incremental_source_community_state(
+        transactions,
+        "source_table",
     )
 
-    joined_sql = "\n".join(fake_sd.sql).lower()
-    assert "insert into table target_table" in joined_sql
-    assert "partition (dt=20260102)" in joined_sql
-    assert "insert overwrite" not in joined_sql
-    assert "left join target_table target" not in joined_sql
-    assert fake_sd.tables[0].columns.tolist() == hive_task.TARGET_SELECT_COLUMNS
-    assert (
-        fake_sd.tables[0].columns.get_loc("update_time")
-        < fake_sd.tables[0].columns.get_loc("is_abnormal")
-    )
+    assert state.existing_storenames == frozenset({"existing-shop"})
+    assert state.members["existing-shop"].community_id == "BD001"
 
 
-def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
+def test_incremental_source_state_allows_updated_status_for_one_merchant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_spdbccc_data_stub(monkeypatch)
     hive_task = importlib.import_module("incremental_assignment.hive_task")
+    transactions = pd.DataFrame(
+        [
+            {
+                hive_task.MERCHANT: "shop",
+                hive_task.RAW_ABNORMAL: "1",
+                hive_task.RAW_BUSINESS_DISTRICT: "BD001",
+            },
+            {
+                hive_task.MERCHANT: "shop",
+                hive_task.RAW_ABNORMAL: "3",
+                hive_task.RAW_BUSINESS_DISTRICT: "BD001",
+            },
+        ]
+    )
+
+    state = hive_task.build_incremental_source_community_state(
+        transactions,
+        "source_table",
+    )
+
+    assert state.existing_storenames == frozenset({"shop"})
+    assert state.members["shop"].community_id == "BD001"
+
+
+def test_existing_merchants_take_priority_over_cross_region_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    source_selection = hive_task.SourceDataSelection(
+        included=pd.DataFrame(
+            [
+                {
+                    "storename": "normal-new-shop",
+                    "is_abnormal": "",
+                    "business_district": "",
+                }
+            ]
+        ),
+        cross_region=pd.DataFrame(
+            [
+                {
+                    "storename": "cross-existing-shop",
+                    "is_abnormal": "",
+                    "business_district": "BD001",
+                },
+                {
+                    "storename": "cross-new-shop",
+                    "is_abnormal": "1",
+                    "business_district": "",
+                },
+            ]
+        ),
+    )
+
+    result = hive_task.preserve_existing_merchants_in_source_selection(
+        source_selection,
+    )
+
+    assert result.included["storename"].tolist() == [
+        "normal-new-shop",
+        "cross-existing-shop",
+    ]
+    assert result.cross_region["storename"].tolist() == ["cross-new-shop"]
+
+
+def test_load_incremental_transactions_matches_initial_column_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    shared_transactions = importlib.import_module("business_district.transactions")
     source = pd.DataFrame(
         [
             {
@@ -871,23 +1090,16 @@ def test_load_incremental_transactions_keeps_first_duplicate_flow_day(
         "20260101",
         "source_table",
     )
+    initial_transactions = shared_transactions.load_hive_transactions(
+        source,
+        ("%Y%m%dT%H%M%S",),
+        "20260101",
+        "source_table",
+    )
 
     assert transactions[hive_task.MERCHANT].tolist() == ["early", "normal"]
     assert transactions[hive_task.DT].tolist() == ["20260101", "20260102"]
-    assert transactions.columns.tolist() == [
-        "card_id",
-        "global_flow_number",
-        "merchant_id",
-        "merchant_category",
-        "timestamp",
-        "longitude",
-        "latitude",
-        "region",
-        "is_interfere",
-        "is_abnormal",
-        "business_district",
-        "dt",
-    ]
+    assert transactions.columns.tolist() == initial_transactions.columns.tolist()
 
 
 def test_load_incremental_transactions_fills_missing_hive_partition_dt(
