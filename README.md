@@ -1,6 +1,6 @@
 # 商圈初始化聚类
 
-本项目实现基于交易共现关系的商圈初始化聚类。主流程直接读取原始交易数据，在内存中构建商户对、商户图和社区结果；本地运行目录只保留可复用的商户对中间文件，Hive 入口负责写入商圈业务结果表。
+本项目实现基于交易共现关系的商圈初始化聚类。主流程直接读取原始交易数据，在内存中构建商户对、商户图和社区结果；商户图会在初始化聚类和已有商圈归属之间直接复用，不再通过中间文件传递，Hive 入口负责写入商圈业务结果表。
 
 ## 运行与配置
 
@@ -8,23 +8,23 @@
 
 本项目不再读取 INI、TOML 等配置文件，也不提供带默认参数的命令行任务入口。初始化聚类和增量归属统一通过项目根目录的 `run_hive_business_district.py` 配置；可以直接执行该 Python 文件，也可以在同目录的 `run_hive_business_district.ipynb` 中运行全部单元。Notebook 直接调用 Python 入口的 `main()`，两种入口使用完全相同的配置和执行逻辑。城市、输入格式、图算法、社区算法、地理参数、锚点、输出目录、增量归属及工作进程数均在 Python 入口中显式构造。
 
-`RuntimeConfig.process_count` 配置工作进程数，必须是不小于 `1` 的整数；主入口当前使用 `4`。初始化聚类会按卡号分片并行计算商户对统计，增量归属会按候选商户分片并行计算图与地理评分。设置为 `1` 时使用相同的串行计算逻辑，适合小数据量运行。
+`RuntimeConfig.process_count` 配置工作进程数，必须是不小于 `1` 的整数；主入口当前使用 `4`。初始化聚类会按卡号分片并行计算商户对统计，增量归属会按候选商户分片并行计算图与地理评分。设置为 `1` 时使用单进程、单 chunk 的串行计算逻辑，不再拆分四个任务，适合内存受限或小数据量运行。
 
-每次运行会在全部商户对统计计算完成后，直接向项目根目录 `code` 文件夹下的 `pair_statistics_{region}.pkl` 写入商户对中间数据，不使用 `.tmp` 临时文件，其中 `region` 使用 `[city].code`。文件使用 Python pickle protocol 4，顶层对象为 `business_district.graph.PairStatistics`，包含以有序商户二元组为键的 `strengths`、同键的 `supports`，以及以商户 ID 为键的 `merchant_visit_counts`；该格式可由项目要求的 Python 3.7 读取。
+初始化聚类和增量归属会在内存中完成商户对统计并直接构建稀疏图，不再自动写入或读取 `pair_statistics_{region}.pkl`。初始化流程构建的原始交易图会直接传给已有商圈归属，避免重复建图；商户对统计在所有依赖计算结束后释放。
 
-可以使用独立诊断脚本分析该中间文件。分析逻辑只依赖 Python 标准库，不导入项目业务模块；任务入口使用线上环境提供的 `spdbccc_data` 执行挂载检查、运行、销毁和 `finish_task()` 收尾。脚本会复算最小支持人数、SPPMI、z-score、互为 top-k 和访问量型连锁商户删除等阶段，并直接打印总体摘要、分布、连通分量和重点商户指标。由于中间文件不包含商户分类和坐标，脚本不能复算分类 `2` 商户删除和疑似线上商户识别。pickle 文件只应来自可信任务输出。
+独立诊断脚本仍可分析历史任务保留或人工生成的商户对文件。分析逻辑只依赖 Python 标准库，不导入项目业务模块；任务入口使用线上环境提供的 `spdbccc_data` 执行挂载检查、运行、销毁和 `finish_task()` 收尾。脚本会复算最小支持人数、SPPMI、z-score、互为 top-k 和访问量型连锁商户删除等阶段，并直接打印总体摘要、分布、连通分量和重点商户指标。由于中间文件不包含商户分类和坐标，脚本不能复算分类 `2` 商户删除和疑似线上商户识别。pickle 文件只应来自可信来源。
 
 ```powershell
 python scripts/analyze_pair_statistics.py
 ```
 
-可以使用 `scripts/inspect_transaction_graph_task.py` 把项目根目录下的 `code/pair_statistics_shanghai.pkl` 复制为项目根目录的 `pair_statistics_shanghai.pkl`，再读取根目录副本并打印其绝对路径、边数和点数。边数取 `strengths` 的商户对数量，点数取 `merchant_visit_counts` 的商户数量；脚本遵循线上 task 的挂载、检查、运行、销毁和 `finish_task()` 生命周期。
+如果已经提供历史或人工生成的 `code/pair_statistics_shanghai.pkl`，可以使用 `scripts/inspect_transaction_graph_task.py` 将其复制为项目根目录的 `pair_statistics_shanghai.pkl`，再读取根目录副本并打印其绝对路径、边数和点数。边数取 `strengths` 的商户对数量，点数取 `merchant_visit_counts` 的商户数量；脚本遵循线上 task 的挂载、检查、运行、销毁和 `finish_task()` 生命周期。
 
 ```powershell
 python scripts/inspect_transaction_graph_task.py
 ```
 
-输入路径、图参数、访问量型商户阈值和重点商户输出数量集中定义在 `scripts/analyze_pair_statistics.py` 顶部；默认基于脚本位置读取项目根目录下的 `code/pair_statistics_shanghai.pkl`，不受任务启动工作目录影响。打印的 JSON 统计覆盖全部商户，每类重点商户默认展示前 `50` 名。分析时直接校验中间文件中的原始字典，只为重点商户生成明细，孤立商户使用计数参与分布统计，避免大规模数据下复制全部商户和商户对。
+输入路径、图参数、访问量型商户阈值和重点商户输出数量集中定义在 `scripts/analyze_pair_statistics.py` 顶部；默认基于脚本位置读取项目根目录下手动提供的 `code/pair_statistics_shanghai.pkl`，不受任务启动工作目录影响。打印的 JSON 统计覆盖全部商户，每类重点商户默认展示前 `50` 名。分析时直接校验中间文件中的原始字典，只为重点商户生成明细，孤立商户使用计数参与分布统计，避免大规模数据下复制全部商户和商户对。
 
 可以使用独立附件邮件任务读取 Hive 结果表、写出 Excel 文件并发送附件。`scripts/send_attachment_email_task.py` 顶部的 `CONFIG` 当前从 `dev_icamp.icamp_merchant_cluster_algo_output` 读取 `dt=20260720`，只保留 `community_id` 非空且不等于空字符串的行，并写入 `/appdata/project/fid_bg_icmp/community_output.xlsx`。读表使用 `spdbccc_data.read_table("dev_icamp.icamp_merchant_cluster_algo_output", dt=["20260720"])` 的完整表名形式，不再单独传入 `db_name`；运行前应核对分区日期、文件名、收件人和抄送人。
 
@@ -86,7 +86,9 @@ Python 入口包含静态算法参数、Hive 表和任务生命周期配置，�
 
 初始化与增量任务会在源数据读取、交易对统计、图构建、聚类或归属、结果写入等关键阶段输出 `[stage]` 日志。每条日志包含阶段名和阶段数据量，不再读取或输出当前进程 RSS；输出使用即时刷新，任务运行期间可直接观察进度。交易对统计会继续输出按卡分组、各工作分片的访问处理量和候选比较次数，以及父进程合并进度；每个工作进程只处理一个分片后退出，生产入口只维护一份累计商户对字典，不为每个分片复制完整快照。坐标可靠性日志会输出有坐标商户数、被异常共享坐标排除的商户数以及单一坐标最大商户数。任务结束时不再输出峰值和平均 RSS 汇总。
 
-增量归属用于把新商户归入已有商圈，并写出本次有效输入中的全部商户。任务先读取参数表和输入表；输入表需要包含 `business_district` 字段。增量任务将 `is_abnormal` 状态 `2`、`5`、`6` 的交易排除在商户对统计和重新归属之外，但仍按商户最新输入记录把原状态和 `business_district` 写回结果表；空值、状态 `1`、`3`、`4`、`7` 及其他状态均保留并参与商户对统计、归属和输出。同一商户可在输入中重新修改状态，不要求各行状态一致，最终是否透传排除状态由最新输入记录决定。商户是否已有商圈仅由非空 `business_district` 判断，与状态无关。带有非空 `business_district` 的已有商户优先保留原商圈，即使商户名命中跨区域规则也不改写为跨区域状态；没有商圈 ID 的商户参与跨区域分类。状态和人工干预预筛选完成后，增量任务复用初始化入口的 `load_hive_transactions`，统一执行必需列、商户分类、关键字段、流水号、坐标和交易时间格式校验。分类 `1`、`2` 且未被人工干预排除的已有商户原样保留输入商圈 ID，新商户写出本次归属结果；写出前会校验每个有效输入商户恰好对应一条结果。同一商户存在多个非空 `business_district` 时直接报错。增量任务根据本次有效输入重新计算完整商户对统计，直接覆盖主入口中的 `algorithm_config.city.code` 和 `algorithm_config.output.directory` 对应的 `pair_statistics_{region}.pkl`，不读取或合并历史中间文件；随后使用本次统计构建稀疏图。有可靠经纬度的新商户直接继承距离最近且位于配置半径内的已有商圈成员 ID，不进行地理投票；没有经纬度或坐标共享商户数超过可靠性上限时，直接继承正 PMI/SPPMI 边权最大的已有商圈邻居 ID，不进行图投票。距离阈值由 `AssignmentConfig` 显式设置，坐标共享商户数上限由 `GeoConfig` 显式设置。
+增量归属用于把新商户归入已有商圈，并写出本次有效输入中的全部商户。任务先读取参数表和输入表；输入表需要包含 `business_district` 字段。增量任务将 `is_abnormal` 状态 `2`、`5`、`6` 的交易排除在商户对统计和重新归属之外，但仍按商户最新输入记录把原状态和 `business_district` 写回结果表；空值、状态 `1`、`3`、`4`、`7` 及其他状态均保留并参与商户对统计、归属和输出。同一商户可在输入中重新修改状态，不要求各行状态一致，最终是否透传排除状态由最新输入记录决定。商户是否已有商圈仅由非空 `business_district` 判断，与状态无关。带有非空 `business_district` 的已有商户优先保留原商圈，即使商户名命中跨区域规则也不改写为跨区域状态；没有商圈 ID 的商户参与跨区域分类。状态和人工干预预筛选完成后，增量任务复用初始化入口的 `load_hive_transactions`，统一执行必需列、商户分类、关键字段、流水号、坐标和交易时间格式校验。分类 `1`、`2` 且未被人工干预排除的已有商户原样保留输入商圈 ID，新商户写出本次归属结果；写出前会校验每个有效输入商户恰好对应一条结果。同一商户存在多个非空 `business_district` 时直接报错。增量任务根据本次有效输入重新计算完整商户对统计，不读取、写入或合并历史 PKL，统计完成后直接在内存中构建稀疏图。有可靠经纬度的新商户直接继承距离最近且位于配置半径内的已有商圈成员 ID，不进行地理投票；没有经纬度或坐标共享商户数超过可靠性上限时，直接继承正 PMI/SPPMI 边权最大的已有商圈邻居 ID，不进行图投票。距离阈值由 `AssignmentConfig` 显式设置，坐标共享商户数上限由 `GeoConfig` 显式设置。
+
+初始化和增量任务会在参数筛选、跨区域输出、交易对统计、图构建、聚类或归属完成后及时释放不再使用的 DataFrame、访问记录、统计对象和图；分片日期写入、商户分类筛选、访问过滤和结果整理会复用函数内部独占的数据，避免重复产生整表副本，以降低峰值内存。
 
 ## 商圈图生成
 
@@ -127,13 +129,7 @@ python scripts/draw_community_graphs.py merchants.csv community_graphs
 
 ## 输出
 
-主流程本地运行只在 `[output].directory` 下写入商户对中间文件：
-
-```text
-pair_statistics_{region}.pkl
-```
-
-该文件是 pickle 格式的 `PairStatistics` 对象，包含 `strengths`、`supports` 和 `merchant_visit_counts`，用于复用商户对统计结果重新执行后续聚类实验。本地运行不再写出业务 CSV 或实验记录文件。
+主流程本地运行不写出商户对 PKL、业务 CSV 或实验记录文件。`[output].directory` 继续作为运行摘要中的配置字段保留，不会仅因商户对统计而创建目录；Hive 入口仍按下述结构写入目标表。
 
 Hive 入口输入表必须包含：
 
@@ -149,7 +145,7 @@ Hive 入口输入表必须包含：
 - `is_abnormal`
 - `business_district`
 
-`merchant_category` 必须是 `0`（线上）、`1`（线下）、`2`（线下连锁店）或 `3`（线下个体户）；同一 `storename` 对应多个分类会直接报错。初始化和增量任务只保留分类 `1`、`2` 的交易进入访问合并、候选边构建和聚类。分类 `2` 不进入社区发现且永远不能成为锚点；无法加入已有商圈而进入新聚类时，可按正权重候选社区展开为一个或多个普通商圈成员；直接加入已有商圈时与其他分类一样只输出一个商圈 ID。`pos_longitude`、`pos_latitude`、`is_interfere`、`is_abnormal` 和 `business_district` 在输入时允许为空；但同一 `storename` 一旦提供 `business_district`，其所有非空值必须一致。`dt` 是 Hive 分区和输出字段，不要求读取结果包含该列；缺失时入口会按分区或任务日期补齐。经纬度只空一列、格式非法或越界时按无坐标处理；同一 `storename` 的有效数值经纬度必须一致，可靠经纬度只用于疑似线上识别和聚类后的已有商圈归属。
+`merchant_category` 必须是 `0`（线上）、`1`（线下）、`2`（线下连锁店）或 `3`（线下个体户）；同一 `storename` 对应多个分类会直接报错。`storename` 按输入原值作为商户标识，不执行 `trim`，因此首尾空格不同的名称属于不同商户。初始化和增量任务只保留分类 `1`、`2` 的交易进入访问合并、候选边构建和聚类。分类 `2` 不进入社区发现且永远不能成为锚点；无法加入已有商圈而进入新聚类时，可按正权重候选社区展开为一个或多个普通商圈成员；直接加入已有商圈时与其他分类一样只输出一个商圈 ID。`pos_longitude`、`pos_latitude`、`is_interfere`、`is_abnormal` 和 `business_district` 在输入时允许为空；但同一 `storename` 一旦提供 `business_district`，其所有非空值必须一致。`dt` 是 Hive 分区和输出字段，不要求读取结果包含该列；缺失时入口会按分区或任务日期补齐。经纬度只空一列、格式非法或越界时按无坐标处理；同一 `storename` 的有效数值经纬度必须一致，可靠经纬度只用于疑似线上识别和聚类后的已有商圈归属。
 
 Hive 参数表 `dev_icamp.icamp_merchant_cluster_algo_param` 必须包含：
 

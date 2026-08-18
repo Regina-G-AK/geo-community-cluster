@@ -397,6 +397,26 @@ def test_load_existing_community_ids_preserves_alphanumeric_ids(
     assert result == {"old-shop": "BD001"}
 
 
+def test_load_existing_community_ids_keeps_storename_whitespace_distinct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("business_district.hive_task")
+    transactions = pd.DataFrame(
+        [
+            {"merchant_id": "old-shop", "business_district": "BD001"},
+            {"merchant_id": " old-shop ", "business_district": "BD002"},
+        ]
+    )
+
+    result = hive_task.load_existing_community_ids(
+        transactions,
+        "source_table",
+    )
+
+    assert result == {"old-shop": "BD001", " old-shop ": "BD002"}
+
+
 def test_load_existing_community_ids_accepts_existing_id_without_format_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -736,6 +756,7 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
     run_result = types.SimpleNamespace(
         business_results=business_results,
         summary=types.SimpleNamespace(output_directory="out"),
+        transaction_graph=object(),
     )
 
     def overwrite_target_table(
@@ -779,6 +800,7 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
         "build_initial_assignment_output",
         lambda clustered_output,
         transactions,
+        transaction_graph,
         config,
         assignment_config,
         source_table,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import gc
 import multiprocessing
 import time
 from dataclasses import dataclass
@@ -47,10 +48,6 @@ from business_district.hive_task import (
     overwrite_target_table,
     split_source_data_by_parameters,
 )
-from business_district.intermediate import (
-    build_pair_statistics_path,
-    write_pair_statistics,
-)
 from business_district.probes import print_probe
 from business_district.status_codes import format_status_code
 from business_district.transactions import (
@@ -67,6 +64,7 @@ from business_district.transactions import (
     TIMESTAMP,
     load_hive_transactions,
     merge_visits,
+    preserve_storename,
 )
 from incremental_assignment.models import AssignmentConfig
 
@@ -132,15 +130,13 @@ def _require_columns(
     required_columns: Set[str],
     table_name: str,
 ) -> pd.DataFrame:
-    result = dataframe.copy()
-    # result.columns = result.columns.astype("string").str.strip()
-    missing_columns = sorted(required_columns.difference(set(result.columns)))
+    missing_columns = sorted(required_columns.difference(set(dataframe.columns)))
     if missing_columns:
         raise TransactionDataError(
             "Hive 表缺少必要字段: "
             f"table={table_name}, missing_columns={missing_columns}"
         )
-    return result
+    return dataframe
 
 
 def _clean_text(value: object) -> str:
@@ -150,12 +146,11 @@ def _clean_text(value: object) -> str:
 
 
 def normalize_incremental_abnormal_statuses(values: pd.Series) -> pd.Series:
-    status_text = values.astype("string").str.strip().fillna("")
-    numeric_statuses = pd.to_numeric(status_text, errors="coerce")
-    normalized = status_text.copy()
+    normalized = values.astype("string").str.strip().fillna("")
+    numeric_statuses = pd.to_numeric(normalized, errors="coerce")
     for status_code in ("1", "2", "3", "4", "5", "6", "7"):
-        numeric_status = status_text.ne("") & numeric_statuses.eq(int(status_code))
-        normalized = normalized.mask(numeric_status, status_code)
+        numeric_status = normalized.ne("") & numeric_statuses.eq(int(status_code))
+        normalized.loc[numeric_status] = status_code
     return normalized
 
 
@@ -172,19 +167,28 @@ def split_incremental_abnormal_statuses(
         source[RAW_ABNORMAL]
     )
     eligible = ~abnormal_statuses.isin(EXCLUDED_INCREMENTAL_ABNORMAL_STATUSES)
-    normalized = source.copy()
-    normalized[RAW_ABNORMAL] = abnormal_statuses
-    return normalized.loc[eligible].copy(), normalized.loc[~eligible].copy()
+    included = source.loc[eligible].copy()
+    excluded = source.loc[~eligible].copy()
+    included[RAW_ABNORMAL] = abnormal_statuses.loc[eligible]
+    excluded[RAW_ABNORMAL] = abnormal_statuses.loc[~eligible]
+    return included, excluded
 
 
 def filter_incremental_abnormal_statuses(
     source_data: pd.DataFrame,
     source_table: str,
 ) -> pd.DataFrame:
-    included, _ = split_incremental_abnormal_statuses(
+    source = _require_columns(
         source_data,
+        {RAW_ABNORMAL},
         source_table,
     )
+    abnormal_statuses = normalize_incremental_abnormal_statuses(
+        source[RAW_ABNORMAL]
+    )
+    eligible = ~abnormal_statuses.isin(EXCLUDED_INCREMENTAL_ABNORMAL_STATUSES)
+    included = source.loc[eligible].copy()
+    included[RAW_ABNORMAL] = abnormal_statuses.loc[eligible]
     return included
 
 
@@ -208,7 +212,7 @@ def preserve_existing_merchants_in_source_selection(
     ).sort_index()
     cross_region = source_selection.cross_region.loc[
         ~existing_cross_region
-    ].copy()
+    ]
     return SourceDataSelection(
         included=included,
         cross_region=cross_region,
@@ -235,16 +239,15 @@ def load_incremental_transactions(
     dt_value: str,
     source_table: str,
 ) -> pd.DataFrame:
-    source = source_data.copy()
-    if DT not in source.columns:
-        source[DT] = dt_value
     source = _require_columns(
-        source,
+        source_data,
         {RAW_MERCHANT, RAW_INTERFERE, RAW_ABNORMAL},
         source_table,
     )
     source = filter_incremental_abnormal_statuses(source, source_table)
-    source[RAW_MERCHANT] = source[RAW_MERCHANT].astype("string").str.strip()
+    if DT not in source.columns:
+        source[DT] = dt_value
+    source[RAW_MERCHANT] = source[RAW_MERCHANT].astype("string")
     source[RAW_INTERFERE] = source[RAW_INTERFERE].astype("string").str.strip()
     interfere_values = source[RAW_INTERFERE].fillna("").str.upper()
     interfered_storenames = set(
@@ -256,7 +259,7 @@ def load_incremental_transactions(
     if interfered_storenames:
         source = source.loc[
             ~source[RAW_MERCHANT].isin(interfered_storenames)
-        ].copy()
+        ]
     transactions = load_hive_transactions(
         source,
         timestamp_formats,
@@ -271,21 +274,24 @@ def load_source_candidates(
     existing_storenames: Set[str],
     dt_value: str,
 ) -> List[HiveCandidateMerchant]:
-    selected = transactions[[MERCHANT, TIMESTAMP, REGION, MERCHANT_CATEGORY]].copy()
+    selected = transactions[[MERCHANT, TIMESTAMP, REGION, MERCHANT_CATEGORY]]
     ordered = selected.sort_values([MERCHANT, TIMESTAMP])
     latest = ordered.drop_duplicates(subset=[MERCHANT], keep="last")
 
     candidates: List[HiveCandidateMerchant] = []
-    for row in latest.to_dict("records"):
-        storename = _clean_text(row[MERCHANT])
+    for storename_value, _, region_value, merchant_category in latest.itertuples(
+        index=False,
+        name=None,
+    ):
+        storename = preserve_storename(storename_value)
         if storename in existing_storenames:
             continue
         candidates.append(
             HiveCandidateMerchant(
                 storename=storename,
-                region=_clean_text(row[REGION]),
+                region=_clean_text(region_value),
                 dt=dt_value,
-                merchant_category=int(row[MERCHANT_CATEGORY]),
+                merchant_category=int(merchant_category),
             )
         )
     return candidates
@@ -318,9 +324,11 @@ def build_source_community_state(
         source_table,
     )
     community_ids_by_storename: Dict[str, Set[str]] = {}
-    for row in source[[MERCHANT, RAW_BUSINESS_DISTRICT]].to_dict("records"):
-        storename = _clean_text(row[MERCHANT])
-        community_id = _clean_text(row[RAW_BUSINESS_DISTRICT])
+    for storename_value, community_id_value in source[
+        [MERCHANT, RAW_BUSINESS_DISTRICT]
+    ].itertuples(index=False, name=None):
+        storename = preserve_storename(storename_value)
+        community_id = _clean_text(community_id_value)
         if not storename or not community_id:
             continue
         if storename not in community_ids_by_storename:
@@ -391,23 +399,28 @@ def build_latest_merchant_coordinates(
         "transactions",
     )
     selected = source.loc[
-        source[LONGITUDE].notna() & source[LATITUDE].notna()
-    ].copy()
+        source[LONGITUDE].notna() & source[LATITUDE].notna(),
+        [MERCHANT, TIMESTAMP, LONGITUDE, LATITUDE],
+    ]
     if selected.empty:
         return {}
     latest = (
         selected.sort_values([MERCHANT, TIMESTAMP])
         .drop_duplicates(subset=[MERCHANT], keep="last")
     )
-    merchant_coordinates: Dict[str, CoordinatePoint] = {
-        _clean_text(row[MERCHANT]): CoordinatePoint(
-            item_id=_clean_text(row[MERCHANT]),
-            longitude=float(row[LONGITUDE]),
-            latitude=float(row[LATITUDE]),
+    merchant_coordinates: Dict[str, CoordinatePoint] = {}
+    for storename_value, _, longitude, latitude in latest.itertuples(
+        index=False,
+        name=None,
+    ):
+        storename = preserve_storename(storename_value)
+        if not storename:
+            continue
+        merchant_coordinates[storename] = CoordinatePoint(
+            item_id=storename,
+            longitude=float(longitude),
+            latitude=float(latitude),
         )
-        for row in latest.to_dict("records")
-        if _clean_text(row[MERCHANT])
-    }
     return filter_reliable_merchant_coordinates(
         merchant_coordinates,
         maximum_merchants_per_coordinate,
@@ -569,20 +582,33 @@ def build_incremental_output(
             f"{assignment_config.community_assignment_distance_meters}"
         )
     timestamp = update_time.strftime("%Y-%m-%d %H:%M:%S")
+    if process_count == 1:
+        rows = _build_incremental_rows(
+            (
+                tuple(candidates),
+                graph,
+                members,
+                merchant_coordinates,
+                assignment_config,
+                timestamp,
+            )
+        )
+        return pd.DataFrame(rows, columns=TARGET_COLUMNS)
+
     chunk_count = min(len(candidates), process_count * 4)
     chunk_size = (
         (len(candidates) + chunk_count - 1) // chunk_count
         if chunk_count > 0
         else 0
     )
-    candidate_chunks = (
-        tuple(
+    candidate_chunks: Tuple[Tuple[HiveCandidateMerchant, ...], ...]
+    if chunk_size > 0:
+        candidate_chunks = tuple(
             tuple(candidates[index : index + chunk_size])
             for index in range(0, len(candidates), chunk_size)
         )
-        if chunk_size > 0
-        else tuple()
-    )
+    else:
+        candidate_chunks = tuple()
     tasks: List[IncrementalOutputTask] = [
         (
             chunk,
@@ -594,7 +620,7 @@ def build_incremental_output(
         )
         for chunk in candidate_chunks
     ]
-    if process_count == 1 or len(tasks) <= 1:
+    if len(tasks) <= 1:
         row_chunks = [_build_incremental_rows(task) for task in tasks]
     else:
         with multiprocessing.Pool(processes=process_count) as pool:
@@ -619,7 +645,7 @@ def build_existing_merchant_output(
         .sort_values([MERCHANT, TIMESTAMP, REGION])
         .drop_duplicates(subset=[MERCHANT], keep="last")
     )
-    existing = latest.loc[latest[MERCHANT].isin(members)].copy()
+    existing = latest.loc[latest[MERCHANT].isin(members)]
     missing_storenames = sorted(set(members).difference(set(existing[MERCHANT])))
     if missing_storenames:
         raise TransactionDataError(
@@ -628,20 +654,25 @@ def build_existing_merchant_output(
         )
 
     timestamp = update_time.strftime("%Y-%m-%d %H:%M:%S")
-    rows: List[IncrementalOutputRow] = [
-        {
-            "storename": _clean_text(row[MERCHANT]),
-            "community_id": members[_clean_text(row[MERCHANT])].community_id,
-            "previous_community_id": "",
-            "region": _clean_text(row[REGION]),
-            "is_interfere": "N",
-            "update_time": timestamp,
-            "is_abnormal": format_status_code(NORMAL_STATUS),
-            "is_position": 0,
-            "dt": str(output_dt),
-        }
-        for row in existing.to_dict("records")
-    ]
+    rows: List[IncrementalOutputRow] = []
+    for storename_value, _, region_value in existing.itertuples(
+        index=False,
+        name=None,
+    ):
+        storename = preserve_storename(storename_value)
+        rows.append(
+            {
+                "storename": storename,
+                "community_id": members[storename].community_id,
+                "previous_community_id": "",
+                "region": _clean_text(region_value),
+                "is_interfere": "N",
+                "update_time": timestamp,
+                "is_abnormal": format_status_code(NORMAL_STATUS),
+                "is_position": 0,
+                "dt": str(output_dt),
+            }
+        )
     return pd.DataFrame(rows, columns=TARGET_COLUMNS)
 
 
@@ -676,27 +707,43 @@ def build_excluded_status_output(
         source[RAW_ABNORMAL]
     )
     latest = (
-        source.sort_values([MERCHANT, TIMESTAMP], kind="stable")
+        source[
+            [
+                MERCHANT,
+                TIMESTAMP,
+                REGION,
+                RAW_ABNORMAL,
+                RAW_BUSINESS_DISTRICT,
+            ]
+        ]
+        .sort_values([MERCHANT, TIMESTAMP], kind="stable")
         .drop_duplicates(subset=[MERCHANT], keep="last")
     )
     excluded = latest.loc[
         latest[RAW_ABNORMAL].isin(EXCLUDED_INCREMENTAL_ABNORMAL_STATUSES)
     ]
     timestamp = update_time.strftime("%Y-%m-%d %H:%M:%S")
-    rows: List[IncrementalOutputRow] = [
-        {
-            "storename": _clean_text(row[MERCHANT]),
-            "community_id": _clean_text(row[RAW_BUSINESS_DISTRICT]),
-            "previous_community_id": "",
-            "region": _clean_text(row[REGION]),
-            "is_interfere": "N",
-            "update_time": timestamp,
-            "is_abnormal": _clean_text(row[RAW_ABNORMAL]),
-            "is_position": 0,
-            "dt": str(output_dt),
-        }
-        for row in excluded.to_dict("records")
-    ]
+    rows: List[IncrementalOutputRow] = []
+    for (
+        storename_value,
+        _,
+        region_value,
+        abnormal_status,
+        community_id,
+    ) in excluded.itertuples(index=False, name=None):
+        rows.append(
+            {
+                "storename": preserve_storename(storename_value),
+                "community_id": _clean_text(community_id),
+                "previous_community_id": "",
+                "region": _clean_text(region_value),
+                "is_interfere": "N",
+                "update_time": timestamp,
+                "is_abnormal": _clean_text(abnormal_status),
+                "is_position": 0,
+                "dt": str(output_dt),
+            }
+        )
     return pd.DataFrame(rows, columns=TARGET_COLUMNS)
 
 
@@ -779,6 +826,7 @@ class TaskMain:
                 parameter_data,
                 self.task_config.parameter_table,
             )
+            del parameter_data
             print_probe(
                 "incremental_hive.parameters_ready",
                 f"parameter_rows={len(parameters)}",
@@ -810,56 +858,31 @@ class TaskMain:
                 self.task_config.source_table,
                 dt=source_dt_list,
             )
-            calculation_source_data, excluded_source_data = (
-                split_incremental_abnormal_statuses(
-                    raw_source_data,
-                    self.task_config.source_table,
-                )
-            )
-            source_selection = split_source_data_by_parameters(
-                calculation_source_data,
+            raw_source_rows = len(raw_source_data)
+            parameter_selection = split_source_data_by_parameters(
+                raw_source_data,
                 parameters,
                 self.task_config.source_table,
                 self.task_config.parameter_table,
             )
-            excluded_source_selection = split_source_data_by_parameters(
-                excluded_source_data,
-                parameters,
-                self.task_config.source_table,
-                self.task_config.parameter_table,
-            )
+            del raw_source_data
+            gc.collect()
             parameter_source_data = pd.concat(
                 [
-                    source_selection.included,
-                    source_selection.cross_region,
-                    excluded_source_selection.included,
-                    excluded_source_selection.cross_region,
+                    parameter_selection.included,
+                    parameter_selection.cross_region,
                 ],
                 ignore_index=False,
                 copy=False,
             ).sort_index()
-            source_selection = preserve_existing_merchants_in_source_selection(
-                source_selection,
-            )
             if parameter_source_data.empty:
                 raise TransactionDataError(
                     "Hive 参数表没有匹配到输入交易: "
                     f"source_table={self.task_config.source_table}, "
                     f"parameter_table={self.task_config.parameter_table}, "
                     f"parameter_count={len(parameters)}, "
-                    f"source_rows={len(raw_source_data)}"
+                    f"source_rows={raw_source_rows}"
                 )
-            filtered_source_data = source_selection.included
-            excluded_status_rows = (
-                len(excluded_source_selection.included)
-                + len(excluded_source_selection.cross_region)
-            )
-            print_probe(
-                "incremental_hive.source_ready",
-                f"included_rows={len(filtered_source_data)}, "
-                f"cross_region_rows={len(source_selection.cross_region)}, "
-                f"excluded_status_rows={excluded_status_rows}",
-            )
             update_time = datetime.datetime.now().astimezone()
             excluded_status_output = build_excluded_status_output(
                 parameter_source_data,
@@ -868,10 +891,57 @@ class TaskMain:
                 self.dt_var,
                 update_time,
             )
+            del parameter_source_data
+            gc.collect()
+            parameter_source_rows = (
+                len(parameter_selection.included)
+                + len(parameter_selection.cross_region)
+            )
+            included_source_data = filter_incremental_abnormal_statuses(
+                parameter_selection.included,
+                self.task_config.source_table,
+            )
+            cross_region_source_data = filter_incremental_abnormal_statuses(
+                parameter_selection.cross_region,
+                self.task_config.source_table,
+            )
+            excluded_status_rows = parameter_source_rows - (
+                len(included_source_data) + len(cross_region_source_data)
+            )
+            del parameter_selection
+            gc.collect()
+            source_selection = preserve_existing_merchants_in_source_selection(
+                SourceDataSelection(
+                    included=included_source_data,
+                    cross_region=cross_region_source_data,
+                )
+            )
+            del included_source_data
+            del cross_region_source_data
+            filtered_source_data = source_selection.included
+            source_rows = len(filtered_source_data)
+            cross_region_rows = len(source_selection.cross_region)
+            print_probe(
+                "incremental_hive.source_ready",
+                f"included_rows={source_rows}, "
+                f"cross_region_rows={cross_region_rows}, "
+                f"excluded_status_rows={excluded_status_rows}",
+            )
+            cross_region_output = build_cross_region_target_output(
+                source_selection.cross_region,
+                source_selection.included,
+                self.task_config.source_table,
+                self.dt_var,
+                update_time,
+            )
+            del source_selection
+            gc.collect()
             if filtered_source_data.empty:
                 target_output = pd.DataFrame(columns=TARGET_COLUMNS)
                 community_rows = 0
                 candidate_count = 0
+                del filtered_source_data
+                gc.collect()
             else:
                 transactions = load_incremental_transactions(
                     filtered_source_data,
@@ -879,6 +949,8 @@ class TaskMain:
                     self.dt_var,
                     self.task_config.source_table,
                 )
+                del filtered_source_data
+                gc.collect()
                 visits = merge_visits(transactions, self.task_config.visit_config)
                 print_probe(
                     "incremental_hive.pair_statistics_started",
@@ -889,11 +961,8 @@ class TaskMain:
                     cooccurrence_config,
                     algorithm_config.runtime.process_count,
                 )
-                pair_statistics_path = build_pair_statistics_path(
-                    algorithm_config.output.directory,
-                    algorithm_config.city.code,
-                )
-                write_pair_statistics(statistics, pair_statistics_path)
+                del visits
+                gc.collect()
                 print_probe(
                     "incremental_hive.pair_statistics_ready",
                     f"pair_count={len(statistics.strengths)}, "
@@ -910,6 +979,8 @@ class TaskMain:
                     f"node_count={graph.number_of_nodes()}, "
                     f"edge_count={graph.number_of_edges()}",
                 )
+                del statistics
+                gc.collect()
                 source_state = build_incremental_source_community_state(
                     transactions,
                     self.task_config.source_table,
@@ -923,10 +994,12 @@ class TaskMain:
                     transactions,
                     algorithm_config.geo.maximum_merchants_per_coordinate,
                 )
+                community_rows = len(source_state.members)
+                candidate_count = len(candidates)
                 print_probe(
                     "incremental_hive.assignment_started",
-                    f"candidate_count={len(candidates)}, "
-                    f"community_member_count={len(source_state.members)}",
+                    f"candidate_count={candidate_count}, "
+                    f"community_member_count={community_rows}",
                 )
                 candidate_output = build_incremental_output(
                     candidates,
@@ -937,6 +1010,10 @@ class TaskMain:
                     update_time,
                     algorithm_config.runtime.process_count,
                 )
+                del candidates
+                del coordinates
+                del graph
+                gc.collect()
                 existing_output = build_existing_merchant_output(
                     transactions,
                     source_state.members,
@@ -949,19 +1026,15 @@ class TaskMain:
                     transactions,
                     self.task_config.source_table,
                 )
+                del candidate_output
+                del existing_output
+                del source_state
+                del transactions
+                gc.collect()
                 print_probe(
                     "incremental_hive.assignment_ready",
                     f"output_rows={len(target_output)}",
                 )
-                community_rows = len(source_state.members)
-                candidate_count = len(candidates)
-            cross_region_output = build_cross_region_target_output(
-                source_selection.cross_region,
-                source_selection.included,
-                self.task_config.source_table,
-                self.dt_var,
-                update_time,
-            )
             target_output = append_cross_region_target_output(
                 target_output,
                 cross_region_output,
@@ -970,12 +1043,15 @@ class TaskMain:
                 target_output,
                 excluded_status_output,
             )
+            del cross_region_output
+            del excluded_status_output
+            gc.collect()
             if target_output.empty:
                 raise TransactionDataError(
                     "参数匹配交易中没有可输出的分类 1、2 商户: "
                     f"source_table={self.task_config.source_table}, "
-                    f"included_rows={len(source_selection.included)}, "
-                    f"cross_region_rows={len(source_selection.cross_region)}"
+                    f"included_rows={source_rows}, "
+                    f"cross_region_rows={cross_region_rows}"
                 )
             print_probe(
                 "incremental_hive.target_write_started",
@@ -999,7 +1075,7 @@ class TaskMain:
             )
             return HiveTaskSummary(
                 dt=self.dt_var,
-                source_rows=len(filtered_source_data),
+                source_rows=source_rows,
                 community_rows=community_rows,
                 candidate_count=candidate_count,
                 inserted_rows=len(target_output),

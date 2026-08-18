@@ -425,7 +425,7 @@ def filter_merchants_by_community_size(
     filtered = merchants.loc[
         merchants["community_id"].isin(kept_community_ids)
     ]
-    return filtered.copy().reset_index(drop=True)
+    return filtered
 
 
 def build_business_results(
@@ -584,7 +584,10 @@ def _hourly_consistency(
     community_merchants: Set[str],
     visits: pd.DataFrame,
 ) -> Tuple[int, float]:
-    selected = visits[visits[MERCHANT].isin(community_merchants)].copy()
+    selected = visits.loc[
+        visits[MERCHANT].isin(community_merchants),
+        [MERCHANT, TIMESTAMP],
+    ]
     hourly = pd.crosstab(selected[MERCHANT], selected[TIMESTAMP].dt.hour)
     hourly = hourly.reindex(columns=range(24), fill_value=0).astype(float)
     community_profile = hourly.sum(axis=0)

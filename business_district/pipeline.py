@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass
 from datetime import datetime
 
+import networkx as nx
 import pandas as pd
 
 from business_district.community import CleaningResult, clean_graph
@@ -17,10 +19,6 @@ from business_district.graph import (
     build_sparse_graph,
     calculate_candidate_community_weight_shares,
     calculate_edge_candidates,
-)
-from business_district.intermediate import (
-    build_pair_statistics_path,
-    write_pair_statistics,
 )
 from business_district.probes import print_probe
 from business_district.results import (
@@ -54,6 +52,7 @@ class RunSummary:
 class RunResult:
     summary: RunSummary
     business_results: pd.DataFrame
+    transaction_graph: nx.Graph
 
 
 def run_algorithm_one_from_transactions(
@@ -62,6 +61,7 @@ def run_algorithm_one_from_transactions(
 ) -> RunResult:
     started_at = datetime.now().astimezone()
     output_directory = config.output.directory
+    input_rows = len(transactions)
     print_probe(
         "initial.prepare_started",
         f"transaction_rows={len(transactions)}",
@@ -90,21 +90,16 @@ def run_algorithm_one_from_transactions(
         f"pair_count={len(statistics.strengths)}, "
         f"merchant_count={len(statistics.merchant_visit_counts)}",
     )
-    write_pair_statistics(
-        statistics,
-        build_pair_statistics_path(output_directory, config.city.code),
-    )
     print_probe("initial.graph_started", "")
     transaction_graph = build_sparse_graph(
         statistics,
         config.cooccurrence,
         config.graph,
     )
-    graph = transaction_graph
     print_probe(
         "initial.graph_ready",
-        f"node_count={graph.number_of_nodes()}, "
-        f"edge_count={graph.number_of_edges()}",
+        f"node_count={transaction_graph.number_of_nodes()}, "
+        f"edge_count={transaction_graph.number_of_edges()}",
     )
     chain_visit_count_threshold = calculate_chain_visit_count_threshold(
         list(statistics.merchant_visit_counts.values()),
@@ -123,8 +118,9 @@ def run_algorithm_one_from_transactions(
     chain_like_merchant_ids = (
         category_chain_merchant_ids | visit_count_chain_merchant_ids
     )
-    clustering_graph = graph.copy()
-    clustering_graph.remove_nodes_from(chain_like_merchant_ids)
+    clustering_graph = transaction_graph.subgraph(
+        node for node in transaction_graph if node not in chain_like_merchant_ids
+    )
     print_probe(
         "initial.community_detection_started",
         f"clustering_node_count={clustering_graph.number_of_nodes()}, "
@@ -136,6 +132,8 @@ def run_algorithm_one_from_transactions(
         merchant_coordinates,
         config.geo.cluster_radius_meters,
     )
+    del clustering_graph, merchant_coordinates
+    gc.collect()
     print_probe(
         "initial.community_detection_ready",
         f"community_count={len(set(cleaning.partition.values()))}, "
@@ -150,6 +148,7 @@ def run_algorithm_one_from_transactions(
         edge_candidates,
         cleaning.partition,
     )
+    del edge_candidates
     raw_merchants = build_merchant_results(
         cleaning,
         statistics,
@@ -160,6 +159,15 @@ def run_algorithm_one_from_transactions(
         chain_visit_count_threshold,
         config.city.code,
     )
+    cleaned_edge_count = cleaning.graph.number_of_edges()
+    del statistics
+    del cleaning
+    del candidate_community_shares
+    del chain_like_merchant_ids
+    del category_chain_merchant_ids
+    del visit_count_chain_merchant_ids
+    del prepared_transactions
+    gc.collect()
     merchants = filter_merchants_by_community_size(
         raw_merchants,
         config.anchors.minimum_community_size,
@@ -169,26 +177,33 @@ def run_algorithm_one_from_transactions(
         visits,
         config.city.code,
     )
+    visit_rows = len(visits)
+    community_count = len(communities)
+    del merchants, visits, communities
     business_results = build_business_results(
         raw_merchants,
         merchant_metadata,
         started_at,
         config.anchors.minimum_community_size,
     )
+    merchant_count = len(business_results)
+    del raw_merchants, merchant_metadata
+    gc.collect()
     print_probe(
         "initial.results_ready",
-        f"merchant_rows={len(business_results)}, community_rows={len(communities)}",
+        f"merchant_rows={merchant_count}, community_rows={community_count}",
     )
     return RunResult(
         summary=RunSummary(
-            input_rows=len(transactions),
-            visit_rows=len(visits),
-            merchant_count=len(business_results),
-            community_count=len(communities),
-            edge_count=cleaning.graph.number_of_edges(),
+            input_rows=input_rows,
+            visit_rows=visit_rows,
+            merchant_count=merchant_count,
+            community_count=community_count,
+            edge_count=cleaned_edge_count,
             output_directory=str(output_directory),
         ),
         business_results=business_results,
+        transaction_graph=transaction_graph,
     )
 
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime
 import importlib
-import pickle
 import sys
 import types
 from pathlib import Path
@@ -11,7 +10,6 @@ import networkx as nx
 import pandas as pd
 import pytest
 
-from business_district.graph import PairStatistics
 from business_district.config import (
     AnchorConfig,
     AppConfig,
@@ -139,6 +137,14 @@ def test_incremental_output_uses_strongest_pmi_edge_and_marks_unassigned(
                 merchant_category=1,
         ),
     ]
+    task_sizes: list[int] = []
+    build_incremental_rows = hive_task._build_incremental_rows
+
+    def record_task_size(task: hive_task.IncrementalOutputTask) -> list[dict[str, object]]:
+        task_sizes.append(len(task[0]))
+        return build_incremental_rows(task)
+
+    monkeypatch.setattr(hive_task, "_build_incremental_rows", record_task_size)
 
     output = hive_task.build_incremental_output(
         candidates,
@@ -154,6 +160,7 @@ def test_incremental_output_uses_strongest_pmi_edge_and_marks_unassigned(
     assert output.loc[0, "is_abnormal"] == "1"
     assert output.loc[1, "community_id"] == ""
     assert output.loc[1, "is_abnormal"] == "3"
+    assert task_sizes == [2]
 
 
 def test_category_two_candidate_uses_single_strongest_pmi_edge(
@@ -785,16 +792,6 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
     fake_sd = _FakeTaskSd(parameter_data, source_data)
     monkeypatch.setattr(hive_task, "sd", fake_sd)
     output_directory = tmp_path / "code"
-    output_directory.mkdir()
-    with (output_directory / "pair_statistics_shanghai.pkl").open("wb") as file:
-        pickle.dump(
-            PairStatistics(
-                strengths={("legacy-a", "legacy-b"): 9.0},
-                supports={("legacy-a", "legacy-b"): 9},
-                merchant_visit_counts={"legacy-a": 9, "legacy-b": 9},
-            ),
-            file,
-        )
     config = hive_task.HiveTaskConfig(
         algorithm_config=_app_config(output_directory),
         timestamp_formats=("%Y%m%dT%H%M%S",),
@@ -839,11 +836,7 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
     assert "insert overwrite table target_table" in joined_sql
     assert "partition (dt='20260101')" in joined_sql
     assert "insert into table target_table" not in joined_sql
-    with (output_directory / "pair_statistics_shanghai.pkl").open("rb") as file:
-        statistics = pickle.load(file)
-    assert ("legacy-a", "legacy-b") not in statistics.strengths
-    assert statistics.supports[("new-shop", "old-shop")] == 1
-    assert statistics.merchant_visit_counts == {"new-shop": 1, "old-shop": 2}
+    assert not output_directory.exists()
 
 
 def test_filter_incremental_abnormal_statuses_excludes_only_2_5_and_6(
@@ -958,6 +951,36 @@ def test_incremental_source_state_uses_business_district_for_existing_merchants(
 
     assert state.existing_storenames == frozenset({"existing-shop"})
     assert state.members["existing-shop"].community_id == "BD001"
+
+
+def test_incremental_source_state_keeps_storename_whitespace_distinct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_spdbccc_data_stub(monkeypatch)
+    hive_task = importlib.import_module("incremental_assignment.hive_task")
+    transactions = pd.DataFrame(
+        [
+            {
+                hive_task.MERCHANT: "shop",
+                hive_task.RAW_ABNORMAL: "",
+                hive_task.RAW_BUSINESS_DISTRICT: "BD001",
+            },
+            {
+                hive_task.MERCHANT: " shop ",
+                hive_task.RAW_ABNORMAL: "",
+                hive_task.RAW_BUSINESS_DISTRICT: "BD002",
+            },
+        ]
+    )
+
+    state = hive_task.build_incremental_source_community_state(
+        transactions,
+        "source_table",
+    )
+
+    assert state.existing_storenames == frozenset({"shop", " shop "})
+    assert state.members["shop"].community_id == "BD001"
+    assert state.members[" shop "].community_id == "BD002"
 
 
 def test_incremental_source_state_allows_updated_status_for_one_merchant(

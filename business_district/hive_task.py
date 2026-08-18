@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import datetime
+import gc
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Dict, Iterator, List, Set, Tuple
 
+import networkx as nx
 import pandas as pd
 import spdbccc_data as sd
 from spdbccc_data import dtDate
@@ -24,11 +26,6 @@ from business_district.cross_region import (
     build_cross_region_target_output,
 )
 from business_district.errors import TransactionDataError
-from business_district.graph import build_sparse_graph
-from business_district.intermediate import (
-    build_pair_statistics_path,
-    read_pair_statistics,
-)
 from business_district.pipeline import run_algorithm_one_from_transactions
 from business_district.probes import print_dataframe_probe, print_probe
 from business_district.region_filter import build_storename_city_mask
@@ -39,6 +36,7 @@ from business_district.transactions import (
     RAW_MERCHANT,
     REGION,
     load_hive_transactions,
+    preserve_storename,
 )
 from incremental_assignment.models import AssignmentConfig
 
@@ -142,12 +140,6 @@ def _read_hive_part_file(
     return dataframe
 
 
-def _with_partition_dt(dataframe: pd.DataFrame, dt_value: str) -> pd.DataFrame:
-    result = dataframe.copy()
-    result["dt"] = str(dt_value)
-    return result
-
-
 def _iter_partitioned_hive_table_parts(
     table_name: str,
     dt_values: List[str],
@@ -166,8 +158,10 @@ def _iter_partitioned_hive_table_parts(
         ):
             dataframe = _read_hive_part_file(file_path, table_name, dt_text)
             if dataframe.empty:
+                del dataframe
                 continue
             yield dataframe, dt_text
+            del dataframe
 
 
 def read_partitioned_hive_table(
@@ -178,13 +172,14 @@ def read_partitioned_hive_table(
     #     "Hive分区表读取开始",
     #     f"table={table_name!r}, dt_values={dt_values!r}",
     # )
-    dataframes = [
-        _with_partition_dt(dataframe, dt_text)
-        for dataframe, dt_text in _iter_partitioned_hive_table_parts(
-            table_name,
-            dt_values,
-        )
-    ]
+    dataframes: List[pd.DataFrame] = []
+    for dataframe, dt_text in _iter_partitioned_hive_table_parts(
+        table_name,
+        dt_values,
+    ):
+        dataframe["dt"] = dt_text
+        dataframes.append(dataframe)
+        del dataframe
 
     if not dataframes:
         raise TransactionDataError(
@@ -194,6 +189,7 @@ def read_partitioned_hive_table(
 
     # print_probe("Hive分片合并开始", f"part_count={len(dataframes)}")
     result = pd.concat(dataframes, ignore_index=True, copy=False)
+    dataframes.clear()
     # print_dataframe_probe("Hive分片合并完成", result)
     return result
 
@@ -246,15 +242,16 @@ def _require_parameter_columns(
     dataframe: pd.DataFrame,
     table_name: str,
 ) -> pd.DataFrame:
-    result = dataframe.copy()
-    # result.columns = result.columns.astype("string").str.strip()
-    missing_columns = sorted(PARAMETER_REQUIRED_COLUMNS.difference(set(result.columns)))
+    # dataframe.columns = dataframe.columns.astype("string").str.strip()
+    missing_columns = sorted(
+        PARAMETER_REQUIRED_COLUMNS.difference(set(dataframe.columns))
+    )
     if missing_columns:
         raise TransactionDataError(
             "Hive 参数表缺少必要字段: "
             f"table={table_name}, missing_columns={missing_columns}"
         )
-    return result
+    return dataframe
 
 
 def _parse_positive_int(value: object, column: str, table_name: str) -> int:
@@ -439,8 +436,8 @@ def split_source_data_by_parameters(
             source_data[RAW_MERCHANT],
             parameter.region,
         )
-        included = included | (region_matched & storename_matched)
-        cross_region = cross_region | (
+        included |= region_matched & storename_matched
+        cross_region |= (
             region_matched & ~storename_matched
         )
     return SourceDataSelection(
@@ -523,21 +520,19 @@ def read_source_hive_table_by_parameters(
         dt_values,
     ):
         source_rows += len(dataframe)
+        dataframe["dt"] = dt_text
         selection = split_source_data_by_parameters(
             dataframe,
             parameters,
             table_name,
             parameter_table,
         )
-        empty_template = _with_partition_dt(dataframe.iloc[0:0], dt_text)
+        empty_template = dataframe.iloc[0:0].copy()
         if not selection.included.empty:
-            included_dataframes.append(
-                _with_partition_dt(selection.included, dt_text)
-            )
+            included_dataframes.append(selection.included)
         if not selection.cross_region.empty:
-            cross_region_dataframes.append(
-                _with_partition_dt(selection.cross_region, dt_text)
-            )
+            cross_region_dataframes.append(selection.cross_region)
+        del selection, dataframe
 
     if source_rows == 0:
         raise TransactionDataError(
@@ -556,11 +551,14 @@ def read_source_hive_table_by_parameters(
         if included_dataframes
         else empty_template.copy()
     )
+    included_dataframes.clear()
     cross_region = (
         pd.concat(cross_region_dataframes, ignore_index=True, copy=False)
         if cross_region_dataframes
         else empty_template.copy()
     )
+    cross_region_dataframes.clear()
+    gc.collect()
     return SourceDataSelection(
         included=included,
         cross_region=cross_region,
@@ -597,9 +595,11 @@ def load_existing_community_ids(
         )
 
     community_ids_by_storename: Dict[str, Set[str]] = {}
-    for row in transactions[[MERCHANT, RAW_BUSINESS_DISTRICT]].to_dict("records"):
-        storename = _clean_text(row[MERCHANT])
-        community_id = _clean_text(row[RAW_BUSINESS_DISTRICT])
+    for storename_value, community_id_value in transactions[
+        [MERCHANT, RAW_BUSINESS_DISTRICT]
+    ].itertuples(index=False, name=None):
+        storename = preserve_storename(storename_value)
+        community_id = _clean_text(community_id_value)
         if not community_id:
             continue
         community_ids_by_storename.setdefault(storename, set()).add(community_id)
@@ -640,7 +640,6 @@ def merge_initial_assignment_output(
             clustered_output["storename"].isin(existing_storenames)
         ]
         .drop_duplicates(subset=["storename"], keep="first")
-        .copy()
     )
     missing_existing_storenames = sorted(
         existing_storenames.difference(set(existing_rows["storename"]))
@@ -659,7 +658,7 @@ def merge_initial_assignment_output(
 
     assigned_rows = assignment_output.loc[
         assignment_output["community_id"].ne("")
-    ].copy()
+    ]
     assigned_rows = assigned_rows.drop_duplicates(
         subset=["storename", "community_id"],
         keep="first",
@@ -669,12 +668,13 @@ def merge_initial_assignment_output(
         ~clustered_output["storename"].isin(
             existing_storenames.union(assigned_storenames)
         )
-    ].copy()
+    ]
     combined = pd.concat(
         [existing_rows, assigned_rows, residual_rows],
         ignore_index=True,
         copy=False,
     )
+    del existing_rows, assigned_rows, residual_rows
 
     existing_ids = set(existing_community_ids.values())
     new_community_mask = (
@@ -710,6 +710,7 @@ def merge_initial_assignment_output(
 def build_initial_assignment_output(
     clustered_output: pd.DataFrame,
     transactions: pd.DataFrame,
+    transaction_graph: nx.Graph,
     config: AppConfig,
     assignment_config: AssignmentConfig,
     source_table: str,
@@ -731,40 +732,34 @@ def build_initial_assignment_output(
     )
 
     community_state = build_source_community_state(transactions, source_table)
-    statistics = read_pair_statistics(
-        build_pair_statistics_path(
-            config.output.directory,
-            config.city.code,
-        )
-    )
-    graph = build_sparse_graph(
-        statistics,
-        config.cooccurrence,
-        config.graph,
-    )
     candidates = load_source_candidates(
         transactions,
         set(community_state.existing_storenames),
         output_dt,
     )
+    merchant_coordinates = build_latest_merchant_coordinates(
+        transactions,
+        config.geo.maximum_merchants_per_coordinate,
+    )
     assignment_output = build_incremental_output(
         candidates,
-        graph,
+        transaction_graph,
         community_state.members,
-        build_latest_merchant_coordinates(
-            transactions,
-            config.geo.maximum_merchants_per_coordinate,
-        ),
+        merchant_coordinates,
         assignment_config,
         datetime.datetime.now().astimezone(),
         config.runtime.process_count,
     )
-    return merge_initial_assignment_output(
+    del candidates, merchant_coordinates, community_state
+    gc.collect()
+    result = merge_initial_assignment_output(
         clustered_output,
         assignment_output,
         existing_community_ids,
         minimum_community_size,
     )
+    del assignment_output
+    return result
 
 
 def build_hive_target_output(
@@ -822,7 +817,7 @@ def overwrite_target_table(
     select_columns = ", ".join(
         f"source.{column}" for column in TARGET_SELECT_COLUMNS
     )
-    write_df = result[TARGET_SELECT_COLUMNS].reset_index(drop=True)
+    write_df = result[TARGET_SELECT_COLUMNS]
     sd.execute_sql(f"drop table if exists {temp_table_name}")
     try:
         sd.write_table(write_df, temp_table_name, debug=False, dt=None)
@@ -860,6 +855,7 @@ class TaskMain:
                 parameter_data,
                 self.task_config.parameter_table,
             )
+            del parameter_data
             print_probe(
                 "initial_hive.parameters_ready",
                 f"parameter_rows={len(parameters)}",
@@ -888,16 +884,28 @@ class TaskMain:
                 self.task_config.parameter_table,
             )
             filtered_source_data = source_selection.included
+            source_rows = len(filtered_source_data)
+            cross_region_rows = len(source_selection.cross_region)
             print_probe(
                 "initial_hive.source_ready",
-                f"included_rows={len(filtered_source_data)}, "
-                f"cross_region_rows={len(source_selection.cross_region)}",
+                f"included_rows={source_rows}, "
+                f"cross_region_rows={cross_region_rows}",
             )
             update_time = datetime.datetime.now().astimezone()
+            cross_region_output = build_cross_region_target_output(
+                source_selection.cross_region,
+                source_selection.included,
+                self.task_config.source_table,
+                self.dt_var,
+                update_time,
+            )
+            del source_selection
+            gc.collect()
             if filtered_source_data.empty:
-                transactions = pd.DataFrame()
                 target_output = pd.DataFrame(columns=TARGET_COLUMNS)
                 output_directory = str(config.output.directory)
+                del filtered_source_data
+                gc.collect()
             else:
                 transactions = load_hive_transactions(
                     filtered_source_data,
@@ -905,6 +913,8 @@ class TaskMain:
                     self.dt_var,
                     self.task_config.source_table,
                 )
+                del filtered_source_data
+                gc.collect()
                 print_probe(
                     "initial_hive.transactions_ready",
                     f"transaction_rows={len(transactions)}",
@@ -913,6 +923,7 @@ class TaskMain:
                     config,
                     transactions,
                 )
+                output_directory = result.summary.output_directory
                 target_output = build_hive_target_output(
                     result.business_results,
                     self.dt_var,
@@ -921,24 +932,21 @@ class TaskMain:
                 target_output = build_initial_assignment_output(
                     target_output,
                     transactions,
+                    result.transaction_graph,
                     config,
                     self.task_config.assignment_config,
                     self.task_config.source_table,
                     self.dt_var,
                     runtime_config.minimum_community_size,
                 )
-                output_directory = result.summary.output_directory
-            cross_region_output = build_cross_region_target_output(
-                source_selection.cross_region,
-                source_selection.included,
-                self.task_config.source_table,
-                self.dt_var,
-                update_time,
-            )
+                del result, transactions
+                gc.collect()
             target_output = append_cross_region_target_output(
                 target_output,
                 cross_region_output,
             )
+            del cross_region_output
+            gc.collect()
             print_probe(
                 "initial_hive.output_ready",
                 f"output_rows={len(target_output)}",
@@ -947,8 +955,8 @@ class TaskMain:
                 raise TransactionDataError(
                     "参数匹配交易中没有可输出的分类 1、2 商户: "
                     f"source_table={self.task_config.source_table}, "
-                    f"included_rows={len(source_selection.included)}, "
-                    f"cross_region_rows={len(source_selection.cross_region)}"
+                    f"included_rows={source_rows}, "
+                    f"cross_region_rows={cross_region_rows}"
                 )
             print_probe(
                 "initial_hive.target_write_started",
@@ -972,7 +980,7 @@ class TaskMain:
             )
             summary = HiveTaskSummary(
                 dt=self.dt_var,
-                input_rows=len(filtered_source_data),
+                input_rows=source_rows,
                 output_rows=len(target_output),
                 output_directory=output_directory,
                 target_table=self.task_config.target_table,

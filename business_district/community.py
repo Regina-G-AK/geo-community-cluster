@@ -26,7 +26,7 @@ def detect_communities(
 ) -> Dict[str, int]:
     connected_nodes = sorted(node for node in graph if graph.degree(node) > 0)
     isolated_nodes = sorted(node for node in graph if graph.degree(node) == 0)
-    connected_graph = graph.subgraph(connected_nodes).copy()
+    connected_graph = graph.subgraph(connected_nodes)
 
     communities: List[Set[str]] = []
     if connected_graph.number_of_nodes() > 0:

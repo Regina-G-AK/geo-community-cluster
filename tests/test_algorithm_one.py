@@ -191,9 +191,56 @@ def test_pair_statistics_multiprocessing_matches_serial_result() -> None:
     updates = list(iter_pair_statistics_updates(visits, config, 1))
 
     assert parallel == serial
-    assert len(updates) == 2
-    assert updates[0].supports == {("a", "b"): 1}
-    assert updates[-1] == serial
+    assert updates == [serial]
+
+
+def test_pair_statistics_process_count_one_does_not_create_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_pool(processes: int, maxtasksperchild: int) -> None:
+        raise AssertionError(
+            "process_count=1 时不应创建进程池: "
+            f"processes={processes}, maxtasksperchild={maxtasksperchild}"
+        )
+
+    monkeypatch.setattr(
+        "business_district.graph.multiprocessing.Pool",
+        reject_pool,
+    )
+    visits = pd.DataFrame(
+        [
+            {
+                CARD: "u1",
+                MERCHANT: "a",
+                TIMESTAMP: pd.Timestamp("2026-01-01 10:00:00"),
+            },
+            {
+                CARD: "u1",
+                MERCHANT: "b",
+                TIMESTAMP: pd.Timestamp("2026-01-01 10:10:00"),
+            },
+        ]
+    )
+    config = CooccurrenceConfig(
+        window_minutes=60,
+        decay_tau_minutes=30.0,
+        minimum_unique_users=1,
+    )
+    statistics = build_pair_statistics(
+        visits,
+        config,
+        1,
+    )
+    updates = list(
+        iter_pair_statistics_updates(
+            visits,
+            config,
+            1,
+        )
+    )
+
+    assert statistics.supports == {("a", "b"): 1}
+    assert updates == [statistics]
 
 
 def test_pair_statistics_updates_overwrite_previous_snapshot(
@@ -248,6 +295,32 @@ def test_load_transactions_rejects_duplicate_flow_number(tmp_path: Path) -> None
         )
 
 
+def test_load_transactions_preserves_storename_whitespace(tmp_path: Path) -> None:
+    transaction_path = tmp_path / "data.txt"
+    _write_transaction_file(
+        transaction_path,
+        [
+            _transaction_row(
+                "u1",
+                "f1",
+                " shop ",
+                "20260101T100000",
+                "shanghai",
+                "20260101",
+            )
+        ],
+    )
+
+    transactions = load_transactions(
+        InputConfig(
+            transactions_path=transaction_path,
+            timestamp_formats=("%Y%m%dT%H%M%S",),
+        )
+    )
+
+    assert transactions[MERCHANT].tolist() == [" shop "]
+
+
 def test_load_hive_transactions_fills_partition_dt() -> None:
     source = pd.DataFrame(
         [
@@ -275,6 +348,35 @@ def test_load_hive_transactions_fills_partition_dt() -> None:
     )
 
     assert transactions[DT].tolist() == ["20260101"]
+
+
+def test_load_hive_transactions_preserves_storename_whitespace() -> None:
+    source = pd.DataFrame(
+        [
+            {
+                "account_number": "u1",
+                "global_flow_number": "f1",
+                "storename": " shop ",
+                "merchant_category": "1",
+                "transaction_time": "20260101T100000",
+                "pos_longitude": "",
+                "pos_latitude": "",
+                "region": "shanghai",
+                "is_interfere": "",
+                "is_abnormal": "",
+                "business_district": "D001",
+            }
+        ]
+    )
+
+    transactions = load_hive_transactions(
+        source,
+        ("%Y%m%dT%H%M%S",),
+        "20260101",
+        "source_table",
+    )
+
+    assert transactions[MERCHANT].tolist() == [" shop "]
 
 
 def test_load_hive_transactions_keeps_first_duplicate_flow_day() -> None:
@@ -1034,7 +1136,7 @@ def test_pipeline_marks_high_visit_merchant_as_suspect_chain_store(
     assert chain_row["is_position"] == 0
 
 
-def test_pipeline_writes_intermediate_output_only(tmp_path: Path) -> None:
+def test_pipeline_returns_graph_without_intermediate_output(tmp_path: Path) -> None:
     transaction_path = tmp_path / "data.txt"
     rows: list[str] = []
     for user_index in range(8):
@@ -1080,13 +1182,11 @@ def test_pipeline_writes_intermediate_output_only(tmp_path: Path) -> None:
 
     output_directory = Path(summary.output_directory)
     assert output_directory == output_path
-    assert sorted(path.name for path in output_directory.iterdir()) == [
-        "pair_statistics_test-city.pkl"
-    ]
-    intermediate_path = output_directory / "pair_statistics_test-city.pkl"
-    assert intermediate_path.read_bytes()[:2] == b"\x80\x04"
+    assert not output_directory.exists()
     assert summary.merchant_count == 4
     assert summary.community_count == 1
+    assert set(run_result.transaction_graph) == {"a", "b", "c", "d"}
+    assert run_result.transaction_graph.number_of_edges() == 3
 
     result = run_result.business_results
     assert list(result.columns) == [
@@ -1124,10 +1224,5 @@ def test_pipeline_writes_intermediate_output_only(tmp_path: Path) -> None:
     assert merchant_a["is_primary_community"] == 1
     assert merchant_a["community_share"] == 1.0
     assert merchant_a["chain_visit_count_threshold"] == 100
-
-    with (output_directory / "pair_statistics_test-city.pkl").open("rb") as file:
-        pair_statistics = pickle.load(file)
-    assert len(pair_statistics.strengths) == 3
-    assert len(pair_statistics.merchant_visit_counts) == 4
 
     assert not (tmp_path / "experiments.md").exists()

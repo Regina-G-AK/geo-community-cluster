@@ -162,17 +162,24 @@ def _partition_card_groups(
             )
             while grouped_visit_count >= next_visit_probe_count:
                 next_visit_probe_count += PAIR_GROUP_PROGRESS_VISIT_INTERVAL
-    chunk_count = min(len(groups), process_count * 4)
+    chunk_count = min(
+        len(groups),
+        1 if process_count == 1 else process_count * 4,
+    )
     if chunk_count == 0:
         print_probe(
             "pair_statistics.card_grouping_complete",
             "card_count=0, grouped_visit_count=0, chunk_count=0",
         )
         return tuple()
-    partitions = tuple(
-        tuple(groups[index::chunk_count])
-        for index in range(chunk_count)
-    )
+    partitions: Tuple[Tuple[CardGroup, ...], ...]
+    if process_count == 1:
+        partitions = (tuple(groups),)
+    else:
+        partitions = tuple(
+            tuple(groups[index::chunk_count])
+            for index in range(chunk_count)
+        )
     print_probe(
         "pair_statistics.card_grouping_complete",
         f"card_count={len(groups)}, grouped_visit_count={grouped_visit_count}, "
@@ -202,6 +209,16 @@ def _iter_pair_statistics_chunks(
     ) as pool:
         for chunk in pool.imap(_build_pair_statistics_chunk, tasks):
             yield chunk
+
+
+def _build_serial_pair_statistics(
+    visits: pd.DataFrame,
+    config: CooccurrenceConfig,
+) -> PairStatistics:
+    partitions = _partition_card_groups(visits, 1)
+    if not partitions:
+        return PairStatistics({}, {}, {})
+    return _build_pair_statistics_chunk((0, partitions[0], config))[1]
 
 
 def _accumulate_pair_statistics_chunks(
@@ -253,7 +270,16 @@ def iter_pair_statistics_updates(
 ) -> Iterator[PairStatistics]:
     if process_count < 1:
         raise ValueError(f"进程数必须不小于 1: process_count={process_count}")
+    if process_count == 1:
+        yield _build_serial_pair_statistics(visits, config)
+        return
     partitions = _partition_card_groups(visits, process_count)
+    if not partitions:
+        yield PairStatistics({}, {}, {})
+        return
+    if len(partitions) == 1:
+        yield _build_pair_statistics_chunk((0, partitions[0], config))[1]
+        return
     tasks = [
         (chunk_index, partition, config)
         for chunk_index, partition in enumerate(partitions)
@@ -305,7 +331,13 @@ def build_pair_statistics(
 ) -> PairStatistics:
     if process_count < 1:
         raise ValueError(f"进程数必须不小于 1: process_count={process_count}")
+    if process_count == 1:
+        return _build_serial_pair_statistics(visits, config)
     partitions = _partition_card_groups(visits, process_count)
+    if not partitions:
+        return PairStatistics({}, {}, {})
+    if len(partitions) == 1:
+        return _build_pair_statistics_chunk((0, partitions[0], config))[1]
     tasks = [
         (chunk_index, partition, config)
         for chunk_index, partition in enumerate(partitions)
@@ -458,6 +490,7 @@ def build_sparse_graph(
     for (left, right), (weight, z_score, support) in candidates.items():
         neighbors[left].append((right, weight, z_score, support))
         neighbors[right].append((left, weight, z_score, support))
+    del candidates
 
     top_neighbors: Dict[
         str,
@@ -472,6 +505,7 @@ def build_sparse_graph(
             neighbor: (weight, z_score, support)
             for neighbor, weight, z_score, support in ordered
         }
+    del neighbors
 
     graph = nx.Graph()
     graph.add_nodes_from(sorted(statistics.merchant_visit_counts))
@@ -488,4 +522,5 @@ def build_sparse_graph(
                 edge_attributes["sppmi"] = float(weight)
                 edge_attributes["z_score"] = float(z_score)
             graph.add_edge(merchant_id, neighbor, **edge_attributes)
+    del top_neighbors
     return graph

@@ -384,34 +384,20 @@ def prepare_geographic_transactions(
     transactions: pd.DataFrame,
     radius_meters: float,
 ) -> GeographicPreparation:
-    reset_transactions = transactions.reset_index(drop=True)
+    prepared_transactions = transactions.reset_index(drop=True)
     print_probe(
         "initial.geo.index_reset_ready",
-        f"row_count={len(reset_transactions)}, "
-        f"column_count={len(reset_transactions.columns)}",
+        f"row_count={len(prepared_transactions)}, "
+        f"column_count={len(prepared_transactions.columns)}",
     )
-    normalized = reset_transactions.copy()
-    print_probe(
-        "initial.geo.normalized_copy_ready",
-        f"row_count={len(normalized)}, column_count={len(normalized.columns)}",
-    )
-    del reset_transactions
-    normalized[MERCHANT] = normalized[MERCHANT].astype(str)
+    prepared_transactions[MERCHANT] = prepared_transactions[MERCHANT].astype(str)
     print_probe(
         "initial.geo.merchant_id_ready",
-        f"row_count={len(normalized)}",
+        f"row_count={len(prepared_transactions)}",
     )
-    if SOURCE_MERCHANT not in normalized.columns:
-        prepared_transactions = normalized.assign(
-            **{SOURCE_MERCHANT: normalized[MERCHANT]}
-        )
+    if SOURCE_MERCHANT not in prepared_transactions.columns:
+        prepared_transactions[SOURCE_MERCHANT] = prepared_transactions[MERCHANT]
     else:
-        prepared_transactions = normalized.copy()
-        print_probe(
-            "initial.geo.prepared_copy_ready",
-            f"row_count={len(prepared_transactions)}, "
-            f"column_count={len(prepared_transactions.columns)}",
-        )
         prepared_transactions[SOURCE_MERCHANT] = prepared_transactions[
             SOURCE_MERCHANT
         ].astype(str)

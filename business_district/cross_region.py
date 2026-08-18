@@ -76,8 +76,11 @@ def build_cross_region_target_output(
             f"table={source_table}, missing_columns={included_missing_columns}"
         )
 
-    source = cross_region_source_data.copy()
-    source[RAW_MERCHANT] = source[RAW_MERCHANT].astype("string").str.strip()
+    source = cross_region_source_data[
+        [RAW_MERCHANT, RAW_MERCHANT_CATEGORY, REGION]
+    ].copy()
+    source.reset_index(drop=True, inplace=True)
+    source[RAW_MERCHANT] = source[RAW_MERCHANT].astype("string")
     source[REGION] = source[REGION].astype("string").str.strip()
     invalid_identifier = (
         source[RAW_MERCHANT].isna()
@@ -113,37 +116,38 @@ def build_cross_region_target_output(
             f"table={source_table}, merchants={conflicted_storenames[:10]}"
         )
 
-    included_source = included_source_data.copy()
-    included_source[RAW_MERCHANT_CATEGORY] = _normalize_merchant_categories(
-        included_source,
+    included_categories = _normalize_merchant_categories(
+        included_source_data,
         source_table,
     )
     included_storenames: Set[str] = set(
-        included_source.loc[
-            included_source[RAW_MERCHANT_CATEGORY].isin({1, 2}),
+        included_source_data.loc[
+            included_categories.isin({1, 2}),
             RAW_MERCHANT,
         ]
         .astype("string")
-        .str.strip()
         .dropna()
         .tolist()
     )
-    eligible = source.loc[
-        source[RAW_MERCHANT_CATEGORY].isin({1, 2})
-        & ~source[RAW_MERCHANT].isin(included_storenames)
-    ].copy()
-    eligible = eligible.drop_duplicates(
+    eligible = source[RAW_MERCHANT_CATEGORY].isin({1, 2}) & ~source[
+        RAW_MERCHANT
+    ].isin(included_storenames)
+    source.drop(index=source.index[~eligible], inplace=True)
+    source.drop_duplicates(
         subset=[RAW_MERCHANT],
         keep="last",
-    ).sort_values(RAW_MERCHANT)
+        inplace=True,
+    )
+    source.sort_values(RAW_MERCHANT, inplace=True)
+    del eligible, included_categories
 
     timestamp = update_time.strftime("%Y-%m-%d %H:%M:%S")
     output = pd.DataFrame(
         {
-            "storename": eligible[RAW_MERCHANT],
+            "storename": source[RAW_MERCHANT],
             "community_id": "",
             "previous_community_id": "",
-            "region": eligible[REGION],
+            "region": source[REGION],
             "is_interfere": "N",
             "update_time": timestamp,
             "is_abnormal": format_status_code("suspect_cross_region"),
@@ -151,7 +155,8 @@ def build_cross_region_target_output(
             "dt": str(output_dt),
         }
     )
-    return output[CROSS_REGION_TARGET_COLUMNS].reset_index(drop=True)
+    output.reset_index(drop=True, inplace=True)
+    return output
 
 
 def append_cross_region_target_output(

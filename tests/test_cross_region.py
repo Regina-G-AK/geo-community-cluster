@@ -56,3 +56,34 @@ def test_build_cross_region_target_output_uses_status_code_and_normal_wins() -> 
             "dt": "20260101",
         }
     ]
+
+
+def test_build_cross_region_target_output_preserves_storename_whitespace() -> None:
+    cross_region_source = pd.DataFrame(
+        [
+            {
+                "storename": " shop ",
+                "merchant_category": "1",
+                "region": "shanghai",
+            }
+        ]
+    )
+    included_source = pd.DataFrame(
+        [
+            {
+                "storename": "shop",
+                "merchant_category": "1",
+                "region": "shanghai",
+            }
+        ]
+    )
+
+    output = build_cross_region_target_output(
+        cross_region_source,
+        included_source,
+        "source_table",
+        "20260101",
+        datetime.datetime(2026, 1, 2, 10, 30, 0),
+    )
+
+    assert output["storename"].tolist() == [" shop "]

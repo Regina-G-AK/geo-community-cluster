@@ -58,6 +58,12 @@ HIVE_REQUIRED_COLUMNS = set(HIVE_SOURCE_COLUMNS).union({DT})
 CLUSTERING_MERCHANT_CATEGORIES = frozenset({1, 2})
 
 
+def preserve_storename(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value)
+
+
 def _parse_timestamps(values: pd.Series, formats: Tuple[str, ...]) -> pd.Series:
     parsed = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
     # text_values = values.astype("string").str.strip()
@@ -96,10 +102,8 @@ def filter_clustering_merchant_categories(
             "Hive 输入表商户分类必须是 0、1、2 或 3: "
             f"table={source_name}, invalid_rows={int(invalid.sum())}, examples={examples}"
         )
-    normalized = dataframe.copy()
-    normalized[RAW_MERCHANT_CATEGORY] = categories.astype(int)
     conflicts = (
-        normalized.groupby(RAW_MERCHANT, sort=True)[RAW_MERCHANT_CATEGORY]
+        categories.groupby(dataframe[RAW_MERCHANT], sort=True)
         .nunique()
     )
     conflicted_merchants = conflicts.loc[conflicts > 1].index.astype(str).tolist()
@@ -108,9 +112,9 @@ def filter_clustering_merchant_categories(
             "Hive 输入表同一商户对应多个商户分类: "
             f"table={source_name}, merchants={conflicted_merchants[:10]}"
         )
-    filtered = normalized.loc[
-        normalized[RAW_MERCHANT_CATEGORY].isin(CLUSTERING_MERCHANT_CATEGORIES)
-    ].copy()
+    eligible = categories.isin(CLUSTERING_MERCHANT_CATEGORIES)
+    filtered = dataframe.loc[eligible].copy()
+    filtered[RAW_MERCHANT_CATEGORY] = categories.loc[eligible].astype(int)
     if filtered.empty:
         raise TransactionDataError(
             "Hive 输入表没有可用于聚类的线下商户交易: "
@@ -121,10 +125,11 @@ def filter_clustering_merchant_categories(
 
 def keep_first_hive_flow_number_rows(selected: pd.DataFrame) -> pd.DataFrame:
     ordered = selected.sort_values([FLOW_NUMBER, DT, RAW_TIMESTAMP], kind="stable")
-    return ordered.drop_duplicates(subset=[FLOW_NUMBER], keep="first").copy()
+    ordered.drop_duplicates(subset=[FLOW_NUMBER], keep="first", inplace=True)
+    return ordered
 
 
-def _parse_coordinates(selected: pd.DataFrame) -> pd.DataFrame:
+def _parse_coordinates(selected: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
     longitude_text = selected[RAW_LONGITUDE]
     latitude_text = selected[RAW_LATITUDE]
     longitude_empty = longitude_text.isna() | longitude_text.eq("")
@@ -149,10 +154,10 @@ def _parse_coordinates(selected: pd.DataFrame) -> pd.DataFrame:
     )
     valid_coordinate = (~partial_coordinate) & valid_range
 
-    result = selected.copy()
-    result[LONGITUDE] = longitude.where(valid_coordinate).astype("Float64")
-    result[LATITUDE] = latitude.where(valid_coordinate).astype("Float64")
-    return result
+    return (
+        longitude.where(valid_coordinate).astype("Float64"),
+        latitude.where(valid_coordinate).astype("Float64"),
+    )
 
 
 def load_transactions(config: InputConfig) -> pd.DataFrame:
@@ -182,21 +187,30 @@ def load_transactions(config: InputConfig) -> pd.DataFrame:
             f"path={path}, missing_columns={missing_columns}"
         )
 
-    selected = source[
-        [
-            RAW_CARD,
-            FLOW_NUMBER,
-            RAW_MERCHANT,
-            RAW_TIMESTAMP,
-            RAW_LONGITUDE,
-            RAW_LATITUDE,
-            REGION,
-            DT,
-        ]
-    ].copy()
+    selected_columns = [
+        RAW_CARD,
+        FLOW_NUMBER,
+        RAW_MERCHANT,
+        RAW_TIMESTAMP,
+        RAW_LONGITUDE,
+        RAW_LATITUDE,
+        REGION,
+        DT,
+    ]
+    unused_columns = [
+        column for column in source.columns if column not in selected_columns
+    ]
+    if unused_columns:
+        source.drop(columns=unused_columns, inplace=True)
+    selected = (
+        source.reindex(columns=selected_columns, copy=False)
+        if list(source.columns) != selected_columns
+        else source
+    )
+    del source
     selected[RAW_CARD] = selected[RAW_CARD].str.strip()
     selected[FLOW_NUMBER] = selected[FLOW_NUMBER].str.strip()
-    selected[RAW_MERCHANT] = selected[RAW_MERCHANT].str.strip()
+    selected[RAW_MERCHANT] = selected[RAW_MERCHANT].astype("string")
     selected[RAW_LONGITUDE] = selected[RAW_LONGITUDE].str.strip()
     selected[RAW_LATITUDE] = selected[RAW_LATITUDE].str.strip()
     selected[REGION] = selected[REGION].str.strip()
@@ -221,7 +235,10 @@ def load_transactions(config: InputConfig) -> pd.DataFrame:
             f"path={path}, invalid_rows={int(invalid_identifier.sum())}, examples={examples}"
         )
 
-    selected = _parse_coordinates(selected)
+    longitude, latitude = _parse_coordinates(selected)
+    selected[LONGITUDE] = longitude
+    selected[LATITUDE] = latitude
+    del longitude, latitude
 
     duplicate_flow_numbers = selected.loc[
         selected[FLOW_NUMBER].duplicated(keep=False),
@@ -246,16 +263,19 @@ def load_transactions(config: InputConfig) -> pd.DataFrame:
             f"examples={examples}, formats={list(config.timestamp_formats)}"
         )
 
-    result = selected.rename(
+    selected.rename(
         columns={
             RAW_CARD: CARD,
             RAW_MERCHANT: MERCHANT,
             RAW_TIMESTAMP: TIMESTAMP,
-        }
+        },
+        inplace=True,
     )
-    result[SOURCE_MERCHANT] = result[MERCHANT]
-    result[TIMESTAMP] = parsed_timestamps
-    return result.sort_values([CARD, TIMESTAMP, MERCHANT]).reset_index(drop=True)
+    selected[SOURCE_MERCHANT] = selected[MERCHANT]
+    selected[TIMESTAMP] = parsed_timestamps
+    selected.sort_values([CARD, TIMESTAMP, MERCHANT], inplace=True)
+    selected.reset_index(drop=True, inplace=True)
+    return selected
 
 
 def load_hive_transactions(
@@ -265,13 +285,11 @@ def load_hive_transactions(
     source_name: str,
 ) -> pd.DataFrame:
     # print_dataframe_probe("Hive交易加载输入", dataframe)
-    source = dataframe.copy()
     # print_probe("Hive交易列名清理开始", f"columns_type={type(source.columns).__name__}")
     # source.columns = source.columns.astype("string").str.strip()
     # print_dataframe_probe("Hive交易列名清理完成", source)
-    if DT not in source.columns:
-        source[DT] = dt_value
-    missing_columns = sorted(HIVE_REQUIRED_COLUMNS.difference(set(source.columns)))
+    required_columns = set(HIVE_SOURCE_COLUMNS)
+    missing_columns = sorted(required_columns.difference(set(dataframe.columns)))
     if missing_columns:
         raise TransactionDataError(
             "Hive 输入表缺少必要字段: "
@@ -279,13 +297,23 @@ def load_hive_transactions(
         )
 
     # print_probe("Hive商户分类过滤开始", f"row_count={len(source)}")
-    source = filter_clustering_merchant_categories(source, source_name)
+    selected = filter_clustering_merchant_categories(dataframe, source_name)
     # print_dataframe_probe("Hive商户分类过滤完成", source)
-
-    selected = source[list(HIVE_SOURCE_COLUMNS) + [DT]].copy()
+    unused_columns = [
+        column
+        for column in selected.columns
+        if column not in required_columns and column != DT
+    ]
+    if unused_columns:
+        selected.drop(columns=unused_columns, inplace=True)
+    if DT not in selected.columns:
+        selected[DT] = dt_value
+    ordered_columns = list(HIVE_SOURCE_COLUMNS) + [DT]
+    if list(selected.columns) != ordered_columns:
+        selected = selected.reindex(columns=ordered_columns, copy=False)
     selected[RAW_CARD] = selected[RAW_CARD].astype("string").str.strip()
     selected[FLOW_NUMBER] = selected[FLOW_NUMBER].astype("string").str.strip()
-    selected[RAW_MERCHANT] = selected[RAW_MERCHANT].astype("string").str.strip()
+    selected[RAW_MERCHANT] = selected[RAW_MERCHANT].astype("string")
     selected[RAW_TIMESTAMP] = selected[RAW_TIMESTAMP].astype("string").str.strip()
     selected[RAW_LONGITUDE] = selected[RAW_LONGITUDE].astype("string").str.strip()
     selected[RAW_LATITUDE] = selected[RAW_LATITUDE].astype("string").str.strip()
@@ -318,7 +346,10 @@ def load_hive_transactions(
         )
 
     # print_probe("Hive坐标解析开始", f"row_count={len(selected)}")
-    selected = _parse_coordinates(selected)
+    longitude, latitude = _parse_coordinates(selected)
+    selected[LONGITUDE] = longitude
+    selected[LATITUDE] = latitude
+    del longitude, latitude
     # print_dataframe_probe("Hive坐标解析完成", selected)
     selected = keep_first_hive_flow_number_rows(selected)
 
@@ -337,30 +368,34 @@ def load_hive_transactions(
             f"examples={examples}, formats={list(timestamp_formats)}"
         )
 
-    result = selected.rename(
+    selected.rename(
         columns={
             RAW_CARD: CARD,
             RAW_MERCHANT: MERCHANT,
             RAW_TIMESTAMP: TIMESTAMP,
             RAW_MERCHANT_CATEGORY: MERCHANT_CATEGORY,
-        }
+        },
+        inplace=True,
     )
-    result[SOURCE_MERCHANT] = result[MERCHANT]
-    result[TIMESTAMP] = parsed_timestamps
-    ordered = result.sort_values([CARD, TIMESTAMP, MERCHANT]).reset_index(drop=True)
+    selected[SOURCE_MERCHANT] = selected[MERCHANT]
+    selected[TIMESTAMP] = parsed_timestamps
+    selected.sort_values([CARD, TIMESTAMP, MERCHANT], inplace=True)
+    selected.reset_index(drop=True, inplace=True)
     # print_dataframe_probe("Hive交易加载完成", ordered)
-    return ordered
+    return selected
 
 
 def build_merchant_metadata(transactions: pd.DataFrame) -> pd.DataFrame:
-    ordered = transactions.sort_values([MERCHANT, TIMESTAMP, REGION, DT])
+    metadata_columns = [MERCHANT, REGION, DT]
+    if MERCHANT_CATEGORY in transactions.columns:
+        metadata_columns.append(MERCHANT_CATEGORY)
+    if SOURCE_MERCHANT in transactions.columns:
+        metadata_columns.append(SOURCE_MERCHANT)
+    ordered = transactions[[TIMESTAMP] + metadata_columns].sort_values(
+        [MERCHANT, TIMESTAMP, REGION, DT]
+    )
     latest_timestamp = ordered.groupby(MERCHANT, sort=True)[TIMESTAMP].transform("max")
     latest_rows = ordered.loc[ordered[TIMESTAMP].eq(latest_timestamp)]
-    metadata_columns = [MERCHANT, REGION, DT]
-    if MERCHANT_CATEGORY in latest_rows.columns:
-        metadata_columns.append(MERCHANT_CATEGORY)
-    if SOURCE_MERCHANT in latest_rows.columns:
-        metadata_columns.append(SOURCE_MERCHANT)
     conflicts = (
         latest_rows.groupby(MERCHANT, sort=True)[[REGION, DT]]
         .nunique()
@@ -372,11 +407,10 @@ def build_merchant_metadata(transactions: pd.DataFrame) -> pd.DataFrame:
             "商户最新交易时间对应的地区或日期不唯一: "
             f"merchants={conflicted_merchants[:10]}"
         )
-    return (
-        latest_rows.drop_duplicates(subset=[MERCHANT], keep="last")[metadata_columns]
-        .copy()
-        .reset_index(drop=True)
-    )
+    result = latest_rows.drop_duplicates(subset=[MERCHANT], keep="last")
+    result.drop(columns=[TIMESTAMP], inplace=True)
+    result.reset_index(drop=True, inplace=True)
+    return result
 
 
 def merge_visits(transactions: pd.DataFrame, config: VisitConfig) -> pd.DataFrame:
@@ -399,6 +433,7 @@ def merge_visits(transactions: pd.DataFrame, config: VisitConfig) -> pd.DataFram
             last_timestamp_by_merchant[merchant_id] = timestamp
 
     visits = pd.DataFrame(visit_rows, columns=[CARD, MERCHANT, TIMESTAMP])
+    del visit_rows
     visits["visit_date"] = visits[TIMESTAMP].dt.normalize()
     daily_counts = (
         visits.groupby([CARD, "visit_date"])[MERCHANT]
@@ -406,12 +441,14 @@ def merge_visits(transactions: pd.DataFrame, config: VisitConfig) -> pd.DataFram
         .rename("daily_merchant_count")
     )
     visits = visits.join(daily_counts, on=[CARD, "visit_date"])
+    del daily_counts
     valid = (
         visits["daily_merchant_count"]
         <= config.maximum_daily_merchants_per_card
     )
-    return (
-        visits.loc[valid, [CARD, MERCHANT, TIMESTAMP]]
-        .sort_values([CARD, TIMESTAMP, MERCHANT])
-        .reset_index(drop=True)
-    )
+    visits.drop(index=visits.index[~valid], inplace=True)
+    del valid
+    visits.drop(columns=["visit_date", "daily_merchant_count"], inplace=True)
+    visits.sort_values([CARD, TIMESTAMP, MERCHANT], inplace=True)
+    visits.reset_index(drop=True, inplace=True)
+    return visits
