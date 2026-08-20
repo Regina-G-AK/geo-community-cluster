@@ -54,7 +54,7 @@ python scripts/draw_merchant_pair_sankey.py
 
 两个等价入口中的 RSS 资源检测当前已注释停用，不再周期采样进程内存，也不再输出 `[memory]` 报告。原资源检测实现、入口调用和测试代码均以注释形式保留，便于需要时恢复。
 
-Hive 任务通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再根据参数表中的 `start_date`、`end_date` 计算输入分区：起止日期相同时直接读取该日分区，例如 `start_date=end_date=20260115` 时读取 `dt=20260115`；起止日期不同时读取时间范围所涉及月份的月底分区，例如范围跨越 2026 年 1 月和 2 月时读取 `dt=20260131`、`dt=20260228`。初始化任务和增量归属任务先按参数表 `region` 关联交易，再使用分行—城市关系筛选 `storename`：不含“市”的名称保留；含“市”的名称必须包含该分行允许的城市，例如上海仅允许“上海市”，兰州允许“兰州市”或“酒泉市”。未配置分行—城市关系的 `region` 会明确报错。被城市规则排除的分类 `1`、`2` 商户不参与聚类，但仍写入最终结果，`community_id` 留空，状态使用 `suspect_cross_region` 并通过 `status_codes` 转换为 `is_abnormal=5`；同一商户若另有符合规则的交易，则以正常聚类结果为准。任务不再判断 `transaction_time` 是否位于 `start_date` 和 `end_date` 之间。交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供，其余静态算法参数由主入口提供。初始化任务会读取 `business_district`：已有非空 ID 不限制格式，同一商户不得对应多个已有 ID；已有商户原样保留该 ID，其他商户先按增量归属规则尝试加入已有商圈，未成功加入的商户才保留初始化聚类产生的纯数字字符串 ID。已有商圈不受最小社区规模过滤影响，新聚类仍按 `min_merchant_count` 过滤。初始化和增量结果都先通过 `spdbccc_data.write_table` 批量写入各自临时表，再通过一条 `INSERT OVERWRITE ... SELECT` SQL 覆盖写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的 T-1 整个分区；任务会在写入前后清理临时表，不保留该分区的历史行，也不再写入风险商户表。
+Hive 任务通过 `spdbccc_data.read_table` 普通读取 `dev_icamp.icamp_merchant_cluster_algo_param` 的 T-1 分区，再根据参数表中的 `start_date`、`end_date` 计算输入分区：起止日期相同时直接读取该日分区，例如 `start_date=end_date=20260115` 时读取 `dt=20260115`；起止日期不同时读取时间范围所涉及月份的月底分区，例如范围跨越 2026 年 1 月和 2 月时读取 `dt=20260131`、`dt=20260228`。初始化任务和增量归属任务先按参数表 `region` 关联交易，再使用分行—城市关系筛选 `storename`：不含“市”的名称保留；含“市”的名称必须包含该分行允许的城市，例如上海仅允许“上海市”，兰州允许“兰州市”或“酒泉市”。未配置分行—城市关系的 `region` 会明确报错。被城市规则排除的分类 `1`、`2` 商户不参与聚类，但仍写入最终结果，`community_id` 留空，状态使用 `suspect_cross_region` 并通过 `status_codes` 转换为 `is_abnormal=5`；同一商户若另有符合规则的交易，则以正常聚类结果为准。任务不再判断 `transaction_time` 是否位于 `start_date` 和 `end_date` 之间。交易时间窗口、时间衰减权重、最小交易次数和最小商户数由参数表提供，其余静态算法参数由主入口提供。初始化任务会读取 `business_district`：已有非空 ID 不限制格式，同一商户不得对应多个已有 ID；已有商户原样保留该 ID，其他商户先按增量归属规则尝试加入已有商圈，未成功加入的商户才保留初始化聚类产生的纯数字字符串 ID。已有商圈不受最小社区规模过滤影响，新聚类仍按 `min_merchant_count` 过滤。初始化和增量结果都先通过 `spdbccc_data.write_table` 批量写入各自临时表，再通过一条 `INSERT OVERWRITE ... SELECT` SQL 覆盖写入 `dev_icamp.icamp_merchant_cluster_algo_output` 的参数表 `end_date` 对应整个分区；任务会在写入前后清理临时表，不保留该分区的历史行，也不再写入风险商户表。
 
 Hive 初始化入口的交易输入表会按 `/appdata/project/fid_bg_icmp/tbl/{表名}/dt={日期}/part*` 分片读取 parquet 文件；每个分片会先按参数表的 `region` 和对应的 `storename` 城市规则筛选，只有命中行才参与最终合并，以降低合并时的峰值内存。`dt` 统一使用分区路径中的日期，即使分片内自带 `dt` 列也会覆盖。日期范围内缺少目录、没有 `part*` 文件或分片全部为空的分区会被跳过；如果全部日期均无有效数据，或所有分片均没有匹配参数规则的交易，任务会明确报错。
 
@@ -171,7 +171,7 @@ Hive 入口写入目标表字段为：
 - `is_position`
 - `dt`
 
-其中 `community_id` 始终按字符串写出：输入已有商圈使用原字母数字 ID，初始化新聚类使用纯数字字符串 ID。分类 `2` 的线下连锁店及访问量规则识别出的连锁/泛客群商户在新聚类结果中可保留多条普通成员挂靠记录且 `is_position` 恒为 `0`；直接加入已有商圈时只保留一条归属。写入 Hive 前按最终输出的 `storename` 去重统计各个新聚类商圈的商户数，低于参数表 `min_merchant_count` 的新商圈不输出商圈 ID，并按疑似孤立商户处理；城市规则排除的商户按疑似跨区域商户处理并写出状态码 `5`。`previous_community_id` 留空，`region` 与输入表保持一致，`is_interfere` 固定为 `N`，`is_abnormal` 使用商户状态码，`update_time` 为运行时间戳，`is_position` 表示是否为锚点商户，`dt` 固定使用任务运行时计算出的 T-1 分区。
+其中 `community_id` 始终按字符串写出：输入已有商圈使用原字母数字 ID，初始化新聚类使用纯数字字符串 ID。分类 `2` 的线下连锁店及访问量规则识别出的连锁/泛客群商户在新聚类结果中可保留多条普通成员挂靠记录且 `is_position` 恒为 `0`；直接加入已有商圈时只保留一条归属。写入 Hive 前按最终输出的 `storename` 去重统计各个新聚类商圈的商户数，低于参数表 `min_merchant_count` 的新商圈不输出商圈 ID，并按疑似孤立商户处理；城市规则排除的商户按疑似跨区域商户处理并写出状态码 `5`。`previous_community_id` 留空，`region` 与输入表保持一致，`is_interfere` 固定为 `N`，`is_abnormal` 使用商户状态码，`update_time` 为运行时间戳，`is_position` 表示是否为锚点商户，`dt` 固定使用参数表 `end_date` 对应的分区。
 
 ## 商户状态
 

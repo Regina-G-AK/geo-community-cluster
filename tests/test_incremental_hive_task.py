@@ -834,9 +834,10 @@ def test_taskrun_reads_source_partitions_from_parameter_table(
     assert output_by_storename.loc["status-six-shop", "community_id"] == "BD006"
     joined_sql = "\n".join(fake_sd.sql).lower()
     assert "insert overwrite table target_table" in joined_sql
-    assert "partition (dt='20260101')" in joined_sql
+    assert "partition (dt='20260102')" in joined_sql
     assert "insert into table target_table" not in joined_sql
     assert not output_directory.exists()
+    assert summary.dt == "20260102"
 
 
 def test_filter_incremental_abnormal_statuses_excludes_only_2_5_and_6(

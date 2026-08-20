@@ -679,8 +679,8 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
     parameter_data = pd.DataFrame(
         [
             {
-                "start_date": "20260101",
-                "end_date": "20260101",
+                "start_date": "20260102",
+                "end_date": "20260102",
                 "region": "shanghai",
                 "max_transaction_time_interval": "90",
                 "min_transaction_number": "1",
@@ -825,11 +825,11 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
     summary = hive_task.TaskMain(task_config).taskrun()
 
     assert reads == [("param_table", ["20260101"])]
-    assert partition_reads == [("source_table", ["20260101"])]
+    assert partition_reads == [("source_table", ["20260102"])]
     assert writes == [
         (
             "temp_table",
-                "20260101",
+                "20260102",
                 {
                     "shop-a": "3",
                     "北京市朝阳区商户": "5",
@@ -838,6 +838,7 @@ def test_taskrun_reads_parameter_table_with_standard_reader(
     ]
     assert summary.input_rows == 1
     assert summary.output_rows == 2
+    assert summary.dt == "20260102"
 
 
 def test_hive_parameters_preserve_entrypoint_decay_tau(

@@ -41,6 +41,7 @@ from business_district.hive_task import (
     PARAMETER_TABLE,
     SourceDataSelection,
     TARGET_COLUMNS,
+    build_target_output_dt,
     build_runtime_config,
     build_source_dt_list,
     filter_source_data_by_parameters as filter_initial_source_data_by_parameters,
@@ -827,9 +828,13 @@ class TaskMain:
                 self.task_config.parameter_table,
             )
             del parameter_data
+            output_dt = build_target_output_dt(
+                parameters,
+                self.task_config.parameter_table,
+            )
             print_probe(
                 "incremental_hive.parameters_ready",
-                f"parameter_rows={len(parameters)}",
+                f"parameter_rows={len(parameters)}, output_dt={output_dt}",
             )
             runtime_config = build_runtime_config(
                 parameters,
@@ -888,7 +893,7 @@ class TaskMain:
                 parameter_source_data,
                 self.task_config.timestamp_formats,
                 self.task_config.source_table,
-                self.dt_var,
+                output_dt,
                 update_time,
             )
             del parameter_source_data
@@ -931,7 +936,7 @@ class TaskMain:
                 source_selection.cross_region,
                 source_selection.included,
                 self.task_config.source_table,
-                self.dt_var,
+                output_dt,
                 update_time,
             )
             del source_selection
@@ -988,7 +993,7 @@ class TaskMain:
                 candidates = load_source_candidates(
                     transactions,
                     set(source_state.existing_storenames),
-                    self.dt_var,
+                    output_dt,
                 )
                 coordinates = build_latest_merchant_coordinates(
                     transactions,
@@ -1017,7 +1022,7 @@ class TaskMain:
                 existing_output = build_existing_merchant_output(
                     transactions,
                     source_state.members,
-                    self.dt_var,
+                    output_dt,
                     update_time,
                 )
                 target_output = combine_incremental_output(
@@ -1062,7 +1067,7 @@ class TaskMain:
                 target_output,
                 self.task_config.target_table,
                 self.task_config.target_temp_table,
-                self.dt_var,
+                output_dt,
             )
             print_probe(
                 "incremental_hive.target_write_complete",
@@ -1074,7 +1079,7 @@ class TaskMain:
                 f"inserted_rows={len(target_output)}"
             )
             return HiveTaskSummary(
-                dt=self.dt_var,
+                dt=output_dt,
                 source_rows=source_rows,
                 community_rows=community_rows,
                 candidate_count=candidate_count,

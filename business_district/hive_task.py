@@ -411,6 +411,22 @@ def build_source_dt_list(parameters: List[HiveAlgorithmParameter]) -> List[str]:
     return sorted(dates)
 
 
+def build_target_output_dt(
+    parameters: List[HiveAlgorithmParameter],
+    parameter_table: str,
+) -> str:
+    output_dates = {
+        parameter.end_date.normalize().strftime("%Y%m%d")
+        for parameter in parameters
+    }
+    if len(output_dates) != 1:
+        raise TransactionDataError(
+            "Hive 参数表同一任务分区内的 end_date 必须一致，无法写入多个目标分区: "
+            f"table={parameter_table}, end_dates={sorted(output_dates)}"
+        )
+    return next(iter(output_dates))
+
+
 def split_source_data_by_parameters(
     source_data: pd.DataFrame,
     parameters: List[HiveAlgorithmParameter],
@@ -856,9 +872,13 @@ class TaskMain:
                 self.task_config.parameter_table,
             )
             del parameter_data
+            output_dt = build_target_output_dt(
+                parameters,
+                self.task_config.parameter_table,
+            )
             print_probe(
                 "initial_hive.parameters_ready",
-                f"parameter_rows={len(parameters)}",
+                f"parameter_rows={len(parameters)}, output_dt={output_dt}",
             )
             runtime_config = build_runtime_config(
                 parameters,
@@ -896,7 +916,7 @@ class TaskMain:
                 source_selection.cross_region,
                 source_selection.included,
                 self.task_config.source_table,
-                self.dt_var,
+                output_dt,
                 update_time,
             )
             del source_selection
@@ -926,7 +946,7 @@ class TaskMain:
                 output_directory = result.summary.output_directory
                 target_output = build_hive_target_output(
                     result.business_results,
-                    self.dt_var,
+                    output_dt,
                     runtime_config.minimum_community_size,
                 )
                 target_output = build_initial_assignment_output(
@@ -936,7 +956,7 @@ class TaskMain:
                     config,
                     self.task_config.assignment_config,
                     self.task_config.source_table,
-                    self.dt_var,
+                    output_dt,
                     runtime_config.minimum_community_size,
                 )
                 del result, transactions
@@ -967,7 +987,7 @@ class TaskMain:
                 target_output,
                 self.task_config.target_table,
                 self.task_config.target_temp_table,
-                self.dt_var,
+                output_dt,
             )
             print_probe(
                 "initial_hive.target_write_complete",
@@ -979,7 +999,7 @@ class TaskMain:
                 f"output_directory={output_directory}"
             )
             summary = HiveTaskSummary(
-                dt=self.dt_var,
+                dt=output_dt,
                 input_rows=source_rows,
                 output_rows=len(target_output),
                 output_directory=output_directory,
