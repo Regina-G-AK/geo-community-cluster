@@ -24,6 +24,12 @@ python scripts/analyze_pair_statistics.py
 python scripts/inspect_transaction_graph_task.py
 ```
 
+可以使用 `scripts/clear_hive_table_directory_task.py` 清空 `/appdata/project/fid_bg_icmp/tbl` 下的全部文件、子目录和符号链接，同时保留 `tbl` 目录本身。脚本固定目标路径，不接受命令行路径参数；运行前会完成平台挂载并校验目标目录，随后执行清理，最后按 `destroy()`、`finish_task()` 完成收尾。该操作不可恢复，运行前必须确认当前任务环境以及目录中的数据均可删除。
+
+```powershell
+python scripts/clear_hive_table_directory_task.py
+```
+
 输入路径、图参数、访问量型商户阈值和重点商户输出数量集中定义在 `scripts/analyze_pair_statistics.py` 顶部；默认基于脚本位置读取项目根目录下手动提供的 `code/pair_statistics_shanghai.pkl`，不受任务启动工作目录影响。打印的 JSON 统计覆盖全部商户，每类重点商户默认展示前 `50` 名。分析时直接校验中间文件中的原始字典，只为重点商户生成明细，孤立商户使用计数参与分布统计，避免大规模数据下复制全部商户和商户对。
 
 可以使用独立附件邮件任务读取 Hive 结果表、写出 Excel 文件并发送附件。`scripts/send_attachment_email_task.py` 顶部的 `CONFIG` 当前从 `dev_icamp.icamp_merchant_cluster_algo_output` 读取 `dt=20260720`，只保留 `community_id` 非空且不等于空字符串的行，并写入 `/appdata/project/fid_bg_icmp/community_output.xlsx`。读表使用 `spdbccc_data.read_table("dev_icamp.icamp_merchant_cluster_algo_output", dt=["20260720"])` 的完整表名形式，不再单独传入 `db_name`；运行前应核对分区日期、文件名、收件人和抄送人。
